@@ -6,7 +6,6 @@ local C = require("src/config.lua")
 
 local V = Vector
 local WEAPON_CLASS, LASER_RANGE = C.WEAPON_CLASS, C.LASER_RANGE
-local clamp = C.clamp
 
 
 local function clamp(v, a, b) return v < a and a or (v > b and b or v) end
