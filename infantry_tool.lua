@@ -20,10 +20,9 @@
     A soldier's build tool on weapon_bugbait: mines, C4, manned guns, trenches,
     fortifications, obstacles and a field menu, all spawned by the chip.
 
-    This file only pulls the modules in. Every module is fetched at compile time
-    by the --@include lines above, then loaded with require(). Because the
-    included files carry --@server / --@client / --@shared, a server never
-    compiles the client half and a client never compiles the server half.
+    by the include lines above, then loaded with require(). Because the
+    included files declare their own realm, a server never compiles the
+    client half and a client never compiles the server half.
 
     Layout (repository path == include name):
       src/config.lua          settings: ranges, timings, limits, materials
