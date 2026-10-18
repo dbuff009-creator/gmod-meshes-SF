@@ -112,9 +112,9 @@ timer.create("it_scan", 0.1, 0, function()
     local now = timer.curtime()
     radarTick = radarTick + 1
     if radarTick % 5 == 0 then sendRadar(now) end
-    if pendingTrip and (not isValid(pendingTrip.prop) or now - pendingTrip.born > 60) then
-        local p = pendingTrip.prop
-        pendingTrip = nil
+    if S.pendingTrip and (not isValid(S.pendingTrip.prop) or now - S.pendingTrip.born > 60) then
+        local p = S.pendingTrip.prop
+        S.pendingTrip = nil
         if isValid(p) then removeObj(p) end
     end
     -- running fuses: a short dedicated list, exact timing
