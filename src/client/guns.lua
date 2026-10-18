@@ -15,6 +15,7 @@ local MORTAR_MARKERS, HM = CC.MORTAR_MARKERS, CC.HM
 local me = C.me
 local SH = require("src/shared.lua")
 local mortarSolve = SH.mortarSolve
+local clamp = SH.clamp
 local fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
 
 -- ---------------- GUNNER (any player sitting in one of the guns) ----------------
