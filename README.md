@@ -94,6 +94,10 @@ python3 tools/smoke.py        # mock-прогон сервера и клиент
 python3 tools/apicheck.py /tmp/sf-src   # сверка вызовов с исходниками StarfallEx
 ```
 
+`tools/smoke.py` запускает Lua-мок через [lupa](https://pypi.org/project/lupa/);
+если модуля нет: `python3 -m venv .venv && .venv/bin/pip install lupa`, затем
+`.venv/bin/python tools/smoke.py`.
+
 `tools/directives.py` повторяет разбор препроцессора (`--@директива` ищется
 регуляркой по всему тексту, включая комментарии): он ловит конфликт
 `--@server` / `--@client` / `--@shared` и фальшивые `--@include` внутри
