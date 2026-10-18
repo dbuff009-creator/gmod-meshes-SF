@@ -297,7 +297,7 @@ local function doPlace(it, pos, ang, normal, lvl, rep)
             sendState("Cell is taken") return
         end
     end
-    if it.kind == "cover" or not (it.col or it.kind == "gun") then
+    if it.kind == "cover" or not (it.col or it.kind == "gun" or it.kind == "tripwire") then
         sendState("This item can't be placed") return
     end
     S.lastPlace = now
@@ -416,7 +416,8 @@ local function clearAll()
         unregister(e)
         if isValid(e) then e:remove() end
     end
-    objs, list = {}, {}
+    for k in pairs(objs) do objs[k] = nil end      -- clear IN PLACE: guns/sensors hold this same table
+    for i = #S.fused, 1, -1 do S.fused[i] = nil end
     sendState("All removed")
 end
 
