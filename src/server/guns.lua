@@ -15,6 +15,7 @@ local MORTAR_MARKERS = C.MORTAR_MARKERS
 local SEAT_MODEL, SEAT_HIDDEN = C.SEAT_MODEL, C.SEAT_HIDDEN
 local clamp, mortarSolve, upFrame = SH.clamp, SH.mortarSolve, SH.upFrame
 local GUN_GEO, MOUNT_LEVELS = IT.GUN_GEO, IT.MOUNT_LEVELS
+local C_GUN = IT.C_GUN
 local gunPivot, gunSeatPos = IT.gunPivot, IT.gunSeatPos
 
 local O = S.O

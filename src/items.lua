@@ -972,6 +972,7 @@ return {
     MOUNT_LEVELS = MOUNT_LEVELS,
     MOUNT_TRENCH = MOUNT_TRENCH,
     MOUNT_FRONT = MOUNT_FRONT,
+    C_GUN = C_GUN,
     gunPivot = gunPivot,
     gunSeatPos = gunSeatPos,
     mountLevelFor = mountLevelFor,

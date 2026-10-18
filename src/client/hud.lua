@@ -14,6 +14,9 @@ local MAX_OBJECTS, PANEL_Y_FRAC, PROP_GRIDS = CC.MAX_OBJECTS, CC.PANEL_Y_FRAC, C
 local ROT_FINE, HIDE_BUGBAIT = CC.ROT_FINE, CC.HIDE_BUGBAIT
 local CAT_NAMES, ITEMS = IT.CAT_NAMES, IT.ITEMS
 local me = C.me
+local fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
+local setMenu, sendSimple = B.setMenu, B.sendSimple
+local bracket, tri2 = G.bracket, G.tri2
 
 -- ---------------- HUD + menu ----------------
 local drawMenu

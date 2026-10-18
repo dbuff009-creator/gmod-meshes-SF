@@ -140,6 +140,7 @@ return {
     MOUNT_LEVELS = MOUNT_LEVELS,
     MOUNT_TRENCH = MOUNT_TRENCH,
     MOUNT_FRONT = MOUNT_FRONT,
+    C_GUN = C_GUN,
     gunPivot = gunPivot,
     gunSeatPos = gunSeatPos,
     mountLevelFor = mountLevelFor,
@@ -291,6 +292,11 @@ sensors_srv = sensors_srv[:_scan_start] + new_scan + sensors_srv[_scan_end:]
 sensors_srv = sensors_srv.replace(
     "    for e, o in pairs(objs) do\n        if isValid(e) and o.armAt and now >= o.armAt then",
     "    for _, e in ipairs(sensors) do\n        local o = objs[e]\n        if isValid(e) and o.armAt and now >= o.armAt then")
+# the pending tripwire lives in the core table now
+sensors_srv = sensors_srv.replace("if pendingTrip and (not isValid(pendingTrip.prop) or now - pendingTrip.born > 60) then",
+                                  "if S.pendingTrip and (not isValid(S.pendingTrip.prop) or now - S.pendingTrip.born > 60) then")
+sensors_srv = sensors_srv.replace("        local p = pendingTrip.prop\n        pendingTrip = nil",
+                                  "        local p = S.pendingTrip.prop\n        S.pendingTrip = nil")
 sensors_srv = sensors_srv.replace(
     "local sensors, cursor = {}, 1\nS.sensors = sensors",
     "local SENSOR_REFRESH = 0.12   -- a sensor is checked at most ~8 times a second\n"
@@ -369,6 +375,7 @@ local MORTAR_MARKERS = C.MORTAR_MARKERS
 local SEAT_MODEL, SEAT_HIDDEN = C.SEAT_MODEL, C.SEAT_HIDDEN
 local clamp, mortarSolve, upFrame = SH.clamp, SH.mortarSolve, SH.upFrame
 local GUN_GEO, MOUNT_LEVELS = IT.GUN_GEO, IT.MOUNT_LEVELS
+local C_GUN = IT.C_GUN
 local gunPivot, gunSeatPos = IT.gunPivot, IT.gunSeatPos
 
 local O = S.O
@@ -611,6 +618,10 @@ local GUN_STATS, GUN_GEO = IT.GUN_STATS, IT.GUN_GEO
 local ITEMS = IT.ITEMS
 local MORTAR_MIN, MORTAR_MAX, MORTAR_CAM_H = CC.MORTAR_MIN, CC.MORTAR_MAX, CC.MORTAR_CAM_H
 local MORTAR_MARKERS, HM = CC.MORTAR_MARKERS, CC.HM
+local me = C.me
+local SH = require("src/shared.lua")
+local mortarSolve = SH.mortarSolve
+local fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
 
 %s
 
@@ -651,6 +662,9 @@ local clamp, upFrame, surfaceAngle, aimTrace = SH.clamp, SH.upFrame, SH.surfaceA
 local badSurface, nadeFix, nadeTransform, wireOk = SH.badSurface, SH.nadeFix, SH.nadeTransform, SH.wireOk
 local ITEMS, ITEM_BY_ID, TRENCH_VAR = IT.ITEMS, IT.ITEM_BY_ID, IT.TRENCH_VAR
 local MOUNT_LEVELS, mountLevelFor, gunPivot = IT.MOUNT_LEVELS, IT.mountLevelFor, IT.gunPivot
+local MOUNT_TRENCH, MOUNT_FRONT = IT.MOUNT_TRENCH, IT.MOUNT_FRONT
+local M = require("src/client/meshes.lua")
+local meshes, bounds, getMat = M.meshes, M.bounds, M.getMat
 
 local me = C.me
 
@@ -704,6 +718,9 @@ local MAX_OBJECTS, PANEL_Y_FRAC, PROP_GRIDS = CC.MAX_OBJECTS, CC.PANEL_Y_FRAC, C
 local ROT_FINE, HIDE_BUGBAIT = CC.ROT_FINE, CC.HIDE_BUGBAIT
 local CAT_NAMES, ITEMS = IT.CAT_NAMES, IT.ITEMS
 local me = C.me
+local fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
+local setMenu, sendSimple = B.setMenu, B.sendSimple
+local bracket, tri2 = G.bracket, G.tri2
 
 %s
 """ % hud_body)

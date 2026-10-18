@@ -151,6 +151,7 @@ if SERVER then
     require("src/server/core.lua")
     require("src/server/guns.lua")
     require("src/server/sensors.lua")
+    C_GUN = require("src/items.lua").C_GUN or Color(70, 72, 68)
     return
 end
 
@@ -158,9 +159,30 @@ local C = require("src/client/core.lua")
 require("src/client/meshes.lua")
 require("src/client/guns.lua")
 
+-- Compatibility shim for the modules currently on main: a handful of names
+-- used to be file-locals of the monolithic chip and are still read as globals
+-- by hud.lua / guns.lua / build.lua (fonts, mesh cache, menu helpers). It is
+-- harmless once the modules are updated -- remove it after that update.
+local function shim()
+    local SH = require("src/shared.lua")
+    mortarSolve = SH.mortarSolve
+    local M = require("src/client/meshes.lua")
+    meshes, bounds, getMat = M.meshes, M.bounds, M.getMat
+    fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
+    me = C.me
+    local G = require("src/client/guns.lua")
+    bracket, tri2 = G.bracket, G.tri2
+    if C.isOwner then
+        local B = require("src/client/build.lua")
+        setMenu, sendSimple = B.setMenu, B.sendSimple
+    end
+end
+
 -- Menu, ghosts and the owner panel only exist on the owner's client.
 -- Everything else (meshes, field lights, gunner view) runs on every client.
 if C.isOwner then
     require("src/client/build.lua")
     require("src/client/hud.lua")
 end
+
+shim()
