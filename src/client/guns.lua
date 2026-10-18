@@ -12,6 +12,10 @@ local GUN_STATS, GUN_GEO = IT.GUN_STATS, IT.GUN_GEO
 local ITEMS = IT.ITEMS
 local MORTAR_MIN, MORTAR_MAX, MORTAR_CAM_H = CC.MORTAR_MIN, CC.MORTAR_MAX, CC.MORTAR_CAM_H
 local MORTAR_MARKERS, HM = CC.MORTAR_MARKERS, CC.HM
+local me = C.me
+local SH = require("src/shared.lua")
+local mortarSolve = SH.mortarSolve
+local fTitle, fMed, fSmall, fCard, fTiny = C.fTitle, C.fMed, C.fSmall, C.fCard, C.fTiny
 
 -- ---------------- GUNNER (any player sitting in one of the guns) ----------------
 local gunner = nil       -- {hidx, it, g, geo}

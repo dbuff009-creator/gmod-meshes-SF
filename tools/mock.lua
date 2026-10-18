@@ -233,10 +233,20 @@ local function newRealm(name)
 
     -- ---------------------------------------------------------- render / input
     local r = {}
-    for _, fn in ipairs({ "setFont", "setRGBA", "setColor", "setMaterial", "drawRect", "drawCircle",
+    for _, fn in ipairs({ "setRGBA", "setColor", "setMaterial", "drawRect", "drawCircle",
         "drawFilledCircle", "drawSimpleText", "draw3DLine", "drawPoly", "drawTexturedRect",
         "drawText", "setCullMode" }) do r[fn] = function() end end
-    r.createFont = function(f, s) assert(type(f) == "string" and type(s) == "number") return { f = f, s = s } end
+    -- fonts behave like Starfall's: createFont returns a registered name and
+    -- setFont throws on anything else (this is what "Font does not exist" is)
+    local fonts = { Default = true, DebugFixed = true, DebugFixedSmall = true,
+        Trebuchet18 = true, Trebuchet24 = true, ChatFont = true, TargetID = true }
+    r.createFont = function(f, s)
+        assert(type(f) == "string" and type(s) == "number", "createFont(font, size)")
+        local name = string.format("sf_font_%s_%d", f, s)
+        fonts[name] = true
+        return name
+    end
+    r.setFont = function(f) assert(fonts[f], "Font does not exist.") r._font = f end
     r.getResolution = function() return 1920, 1080 end
     env.render = r
 

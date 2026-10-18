@@ -18,6 +18,9 @@ local clamp, upFrame, surfaceAngle, aimTrace = SH.clamp, SH.upFrame, SH.surfaceA
 local badSurface, nadeFix, nadeTransform, wireOk = SH.badSurface, SH.nadeFix, SH.nadeTransform, SH.wireOk
 local ITEMS, ITEM_BY_ID, TRENCH_VAR = IT.ITEMS, IT.ITEM_BY_ID, IT.TRENCH_VAR
 local MOUNT_LEVELS, mountLevelFor, gunPivot = IT.MOUNT_LEVELS, IT.mountLevelFor, IT.gunPivot
+local MOUNT_TRENCH, MOUNT_FRONT = IT.MOUNT_TRENCH, IT.MOUNT_FRONT
+local M = require("src/client/meshes.lua")
+local meshes, bounds, getMat = M.meshes, M.bounds, M.getMat
 
 local me = C.me
 
