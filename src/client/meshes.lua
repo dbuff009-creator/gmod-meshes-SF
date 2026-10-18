@@ -188,7 +188,7 @@ local function meshesThink()
         local n = 0
         while coroutine.status(builder) ~= "dead" and cpuUsed() < budget and n < 2000 do
             n = n + 1
-            local ok, err = coroutine.resume(builder)
+            local ok, err = pcall(coroutine.resume, builder)   -- SF resume is NOT protected and has no ok flag
             if not ok then print("[Infantry Tool] mesh builder error: " .. tostring(err)) break end
         end
         return
