@@ -43,9 +43,9 @@ function drawMenu(W, H)
         return
     end
     render.setRGBA(10, 14, 10, 225)
-    render.drawRect(px, py, pw, ph)
+    render.drawRectFast(px, py, pw, ph)
     render.setRGBA(120, 160, 90, 255)
-    render.drawRect(px, py, pw, 3)
+    render.drawRectFast(px, py, pw, 3)
     render.setFont(fTitle)
     render.setRGBA(200, 230, 170, 255)
     render.drawSimpleText(px + 20, py + 30, "INFANTRY TOOL", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -59,7 +59,7 @@ function drawMenu(W, H)
         local tx, ty, th = px + 20 + (i - 1) * (tw + 6), py + 58, 36
         local hov = inside(mx, my, tx, ty, tw, th)
         if B.menuTab == i then render.setRGBA(120, 160, 90, 255) elseif hov then render.setRGBA(70, 90, 60, 255) else render.setRGBA(40, 50, 36, 255) end
-        render.drawRect(tx, ty, tw, th)
+        render.drawRectFast(tx, ty, tw, th)
         render.setFont(fMed)
         render.setRGBA(255, 255, 255, 255)
         render.drawSimpleText(tx + tw / 2, ty + th / 2, name, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -75,10 +75,10 @@ function drawMenu(W, H)
             local y = cy0 + row * (CARD_H + CARD_GAP)
             local hov = inside(mx, my, x, y, CARD_W, CARD_H)
             if B.selected == it then render.setRGBA(90, 130, 70, 255) elseif hov then render.setRGBA(60, 75, 52, 255) else render.setRGBA(32, 40, 30, 255) end
-            render.drawRect(x, y, CARD_W, CARD_H)
+            render.drawRectFast(x, y, CARD_W, CARD_H)
             local c = it.color or Color(160, 160, 160)
             render.setRGBA(c.r, c.g, c.b, 255)
-            render.drawRect(x + 7, y + 8, 8, CARD_H - 16)
+            render.drawRectFast(x + 7, y + 8, 8, CARD_H - 16)
             render.setFont(fCard)
             render.setRGBA(255, 255, 255, 255)
             render.drawSimpleText(x + 22, y + 21, it.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -103,7 +103,7 @@ function drawMenu(W, H)
     local bx, by = px + 20, py + ph - 56
     local hovC = inside(mx, my, bx, by, 180, 38)
     render.setRGBA(hovC and 190 or 140, 40, 40, 255)
-    render.drawRect(bx, by, 180, 38)
+    render.drawRectFast(bx, by, 180, 38)
     render.setFont(fMed)
     render.setRGBA(255, 255, 255, 255)
     render.drawSimpleText(bx + 90, by + 19, "CLEAR ALL", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -112,7 +112,7 @@ function drawMenu(W, H)
     local hx = px + pw - 200
     local hovX = inside(mx, my, hx, by, 180, 38)
     render.setRGBA(hovX and 90 or 60, hovX and 90 or 60, hovX and 90 or 60, 255)
-    render.drawRect(hx, by, 180, 38)
+    render.drawRectFast(hx, by, 180, 38)
     render.setRGBA(255, 255, 255, 255)
     render.drawSimpleText(hx + 90, by + 19, "CLOSE", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
     render.setFont(fSmall)
@@ -244,9 +244,9 @@ local function drawEditor(W, H)
     local pw, ph = 460, 330
     local px, py = (W - pw) / 2, (H - ph) / 2
     render.setRGBA(10, 14, 10, 230)
-    render.drawRect(px, py, pw, ph)
+    render.drawRectFast(px, py, pw, ph)
     render.setRGBA(ed.col.r, ed.col.g, ed.col.b, 255)
-    render.drawRect(px, py, pw, 3)
+    render.drawRectFast(px, py, pw, 3)
     render.setFont(fTitle)
     render.setRGBA(200, 230, 170, 255)
     render.drawSimpleText(px + 20, py + 28, "RALLY FLAG", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -254,9 +254,9 @@ local function drawEditor(W, H)
     -- name field
     local fx, fy, fw, fh = px + 20, py + 52, pw - 40, 40
     render.setRGBA(30, 36, 28, 255)
-    render.drawRect(fx, fy, fw, fh)
+    render.drawRectFast(fx, fy, fw, fh)
     render.setRGBA(ed.col.r, ed.col.g, ed.col.b, 255)
-    render.drawRect(fx, fy + fh - 2, fw, 2)
+    render.drawRectFast(fx, fy + fh - 2, fw, 2)
     render.setFont(fMed)
     render.setRGBA(255, 255, 255, 255)
     local caret = (math.floor(timer.realtime() * 2) % 2 == 0) and "_" or ""
@@ -270,7 +270,7 @@ local function drawEditor(W, H)
         local cy = py + 104 + math.floor((i - 1) / 4) * (bh + 6)
         local hov = inside(mx, my, cx, cy, bw, bh)
         if ed.name == n then render.setRGBA(90, 130, 70, 255) elseif hov then render.setRGBA(60, 75, 52, 255) else render.setRGBA(36, 44, 32, 255) end
-        render.drawRect(cx, cy, bw, bh)
+        render.drawRectFast(cx, cy, bw, bh)
         render.setRGBA(255, 255, 255, 240)
         render.drawSimpleText(cx + bw / 2, cy + bh / 2, n, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
         if click and hov then ed.name = n end
@@ -285,10 +285,10 @@ local function drawEditor(W, H)
         local sel = ed.col.r == c.r and ed.col.g == c.g and ed.col.b == c.b
         if sel or hov then
             render.setRGBA(255, 255, 255, sel and 255 or 120)
-            render.drawRect(cx - 3, sy - 3, sw + 6, 40)
+            render.drawRectFast(cx - 3, sy - 3, sw + 6, 40)
         end
         render.setRGBA(c.r, c.g, c.b, 255)
-        render.drawRect(cx, sy, sw, 34)
+        render.drawRectFast(cx, sy, sw, 34)
         if click and hov then ed.col = c end
     end
 
@@ -298,9 +298,9 @@ local function drawEditor(W, H)
     local hovOk = inside(mx, my, fx, by, okW, 38)
     local hovNo = inside(mx, my, fx + okW + 10, by, okW, 38)
     render.setRGBA(hovOk and 100 or 70, hovOk and 160 or 120, hovOk and 80 or 60, 255)
-    render.drawRect(fx, by, okW, 38)
+    render.drawRectFast(fx, by, okW, 38)
     render.setRGBA(hovNo and 90 or 60, hovNo and 90 or 60, hovNo and 90 or 60, 255)
-    render.drawRect(fx + okW + 10, by, okW, 38)
+    render.drawRectFast(fx + okW + 10, by, okW, 38)
     render.setFont(fMed)
     render.setRGBA(255, 255, 255, 255)
     render.drawSimpleText(fx + okW / 2, by + 19, "OK", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -313,6 +313,7 @@ local function drawEditor(W, H)
 end
 
 hook.add("drawhud", "it_flags", function()
+    pcall(render.setColorModulation, 1, 1, 1) pcall(render.setBlend, 1)   -- world tint leaks into HUD quads
     if ed then
         local W, H = render.getResolution()
         drawEditor(W, H)
@@ -334,7 +335,7 @@ hook.add("drawhud", "it_flags", function()
                     render.drawFilledCircle(sp.x, sp.y, 7)
                     render.setRGBA(c.r, c.g, c.b, 235)
                     render.drawFilledCircle(sp.x, sp.y, 5)
-                    render.drawRect(sp.x - 1, sp.y + 5, 2, 10)
+                    render.drawRectFast(sp.x - 1, sp.y + 5, 2, 10)
                     render.setRGBA(255, 255, 255, 230)
                     render.drawSimpleText(sp.x, sp.y - 16, string.format("%s  %.0f m", fi.name, p:getDistance(myPos) * 0.01905),
                         TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -352,23 +353,24 @@ end)
 end
 
 hook.add("drawhud", "it_hud", function()
+    pcall(render.setColorModulation, 1, 1, 1) pcall(render.setBlend, 1)   -- world tint leaks into HUD quads
     if not C.holding then return end
     local W, H = render.getResolution()
     if B.menuOpen then drawMenu(W, H) return end
     if C.camViewEnt then
         render.setRGBA(0, 0, 0, 160)
-        render.drawRect(W / 2 - 150, 30, 300, 40)
+        render.drawRectFast(W / 2 - 150, 30, 300, 40)
         render.setFont(fMed)
         render.setRGBA(255, 255, 255, 240)
         render.drawSimpleText(W / 2, 50, "CAM " .. B.camIdx .. " / " .. B.camCount .. "    B = next / off", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
         render.setRGBA(255, 255, 255, 150)
         bracket(W / 2 - 200, H / 2 - 120, 400, 240, 40)
-        render.drawRect(W / 2 - 10, H / 2, 20, 1) render.drawRect(W / 2, H / 2 - 10, 1, 20)
+        render.drawRectFast(W / 2 - 10, H / 2, 20, 1) render.drawRectFast(W / 2, H / 2 - 10, 1, 20)
     end
 
     local x, y = W - 350, H * PANEL_Y_FRAC
     render.setRGBA(0, 0, 0, 155)
-    render.drawRect(x, y, 330, 150)
+    render.drawRectFast(x, y, 330, 150)
     render.setFont(fMed)
     render.setRGBA(170, 220, 130, 255)
     render.drawSimpleText(x + 12, y + 16, "INFANTRY TOOL", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -421,6 +423,7 @@ net.receive("it_radar", function()
     radarT = timer.realtime()
 end)
 hook.add("drawhud", "it_radarhud", function()
+    pcall(render.setColorModulation, 1, 1, 1) pcall(render.setBlend, 1)   -- world tint leaks into HUD quads
     if #radarPts == 0 or timer.realtime() - radarT > 1.6 then return end
     render.setFont(fTiny)
     local eye = me:getShootPos()

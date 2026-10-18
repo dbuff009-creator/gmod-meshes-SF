@@ -148,10 +148,10 @@ pcall(hook.add, "mousewheeled", "it_mwheel", function(delta)
 end)
 
 function bracket(x, y, w, h, l)
-    render.drawRect(x, y, l, 2) render.drawRect(x, y, 2, l)
-    render.drawRect(x + w - l, y, l, 2) render.drawRect(x + w - 2, y, 2, l)
-    render.drawRect(x, y + h - 2, l, 2) render.drawRect(x, y + h - l, 2, l)
-    render.drawRect(x + w - l, y + h - 2, l, 2) render.drawRect(x + w - 2, y + h - l, 2, l)
+    render.drawRectFast(x, y, l, 2) render.drawRectFast(x, y, 2, l)
+    render.drawRectFast(x + w - l, y, l, 2) render.drawRectFast(x + w - 2, y, 2, l)
+    render.drawRectFast(x, y + h - 2, l, 2) render.drawRectFast(x, y + h - l, 2, l)
+    render.drawRectFast(x + w - l, y + h - 2, l, 2) render.drawRectFast(x + w - 2, y + h - l, 2, l)
 end
 function drawMortarHud(W, H, h)
     if not mcam then return end
@@ -182,8 +182,8 @@ function drawMortarHud(W, H, h)
     local rp = math.max(8, math.sqrt((se.x - sp.x) ^ 2 + (se.y - sp.y) ^ 2))
     render.setRGBA(sc.r, sc.g, sc.b, 230)
     render.drawCircle(cx, cy, rp) render.drawCircle(cx, cy, rp + 1)
-    render.drawRect(cx - 30, cy, 22, 2) render.drawRect(cx + 9, cy, 22, 2)
-    render.drawRect(cx, cy - 30, 2, 22) render.drawRect(cx, cy + 9, 2, 22)
+    render.drawRectFast(cx - 30, cy, 22, 2) render.drawRectFast(cx + 9, cy, 22, 2)
+    render.drawRectFast(cx, cy - 30, 2, 22) render.drawRectFast(cx, cy + 9, 2, 22)
     render.drawFilledCircle(cx + 1, cy + 1, 2)
     render.setFont(fMed)
     render.drawSimpleText(cx, cy + rp + 22, status, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -191,8 +191,8 @@ function drawMortarHud(W, H, h)
     local mp = base:toScreen()
     if mp.visible then
         render.setRGBA(120, 200, 255, 220)
-        render.drawRect(mp.x - 6, mp.y - 6, 12, 2) render.drawRect(mp.x - 6, mp.y + 4, 12, 2)
-        render.drawRect(mp.x - 6, mp.y - 6, 2, 12) render.drawRect(mp.x + 4, mp.y - 6, 2, 12)
+        render.drawRectFast(mp.x - 6, mp.y - 6, 12, 2) render.drawRectFast(mp.x - 6, mp.y + 4, 12, 2)
+        render.drawRectFast(mp.x - 6, mp.y - 6, 2, 12) render.drawRectFast(mp.x + 4, mp.y - 6, 2, 12)
         render.setFont(fTiny)
         render.drawSimpleText(mp.x, mp.y - 16, "MORTAR", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
     end
@@ -222,8 +222,8 @@ function drawMortarHud(W, H, h)
                     local veh = e:isPlayer() and e:inVehicle()
                     if veh then render.setRGBA(255, 160, 40, 240) else render.setRGBA(255, 60, 60, 240) end
                     local k = 7
-                    render.drawRect(s2.x - k, s2.y - k, 2 * k, 2) render.drawRect(s2.x - k, s2.y + k - 2, 2 * k, 2)
-                    render.drawRect(s2.x - k, s2.y - k, 2, 2 * k) render.drawRect(s2.x + k - 2, s2.y - k, 2, 2 * k)
+                    render.drawRectFast(s2.x - k, s2.y - k, 2 * k, 2) render.drawRectFast(s2.x - k, s2.y + k - 2, 2 * k, 2)
+                    render.drawRectFast(s2.x - k, s2.y - k, 2, 2 * k) render.drawRectFast(s2.x + k - 2, s2.y - k, 2, 2 * k)
                     render.drawSimpleText(s2.x, s2.y - 16, string.format("%.0f m", V(c.x - base.x, c.y - base.y, 0):getLength() * 0.01905),
                         TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
                 end
@@ -261,7 +261,7 @@ function drawMortarHud(W, H, h)
     -- info panel
     local x, y = 60, 110
     render.setRGBA(0, 0, 0, 150)
-    render.drawRect(x, y, 260, 150)
+    render.drawRectFast(x, y, 260, 150)
     render.setFont(fSmall)
     render.setRGBA(255, 255, 255, 230)
     render.drawSimpleText(x + 12, y + 16, "ANGLE  " .. mcam.pitch .. " deg", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -269,9 +269,9 @@ function drawMortarHud(W, H, h)
     render.drawSimpleText(x + 12, y + 60, t and string.format("FLIGHT  %.1f s", t) or "FLIGHT  -", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
     render.drawSimpleText(x + 12, y + 82, string.format("ALT  %.0f m", math.max(0, mcam.pos.z - tgt.z) * 0.01905), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
     render.drawSimpleText(x + 12, y + 104, string.format("MAX  %.0f m   MIN  %.0f m", MORTAR_MAX * 0.01905, MORTAR_MIN * 0.01905), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
-    render.setRGBA(40, 40, 40, 255) render.drawRect(x + 12, y + 124, 236, 10)
-    if reloading then render.setRGBA(230, 200, 90, 255) render.drawRect(x + 12, y + 124, 236 * gst.prog, 10)
-    else render.setRGBA(120, 255, 120, 255) render.drawRect(x + 12, y + 124, 236, 10) end
+    render.setRGBA(40, 40, 40, 255) render.drawRectFast(x + 12, y + 124, 236, 10)
+    if reloading then render.setRGBA(230, 200, 90, 255) render.drawRectFast(x + 12, y + 124, 236 * gst.prog, 10)
+    else render.setRGBA(120, 255, 120, 255) render.drawRectFast(x + 12, y + 124, 236, 10) end
     render.setRGBA(255, 255, 255, 200)
     render.drawSimpleText(W / 2, H - 70, "WASD fly   Space / Alt height   Shift fast   Wheel / RMB / R angle   LMB fire   E leave",
         TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
@@ -309,10 +309,10 @@ local function scopeOverlay(W, H)
     local cx, cy, R = W / 2, H / 2, H * 0.47
     render.setMaterial()
     render.setRGBA(0, 0, 0, 255)
-    render.drawRect(0, 0, cx - R + 1, H)
-    render.drawRect(cx + R - 1, 0, W - cx - R + 2, H)
-    render.drawRect(cx - R, 0, R * 2, cy - R + 1)
-    render.drawRect(cx - R, cy + R - 1, R * 2, H - cy - R + 2)
+    render.drawRectFast(0, 0, cx - R + 1, H)
+    render.drawRectFast(cx + R - 1, 0, W - cx - R + 2, H)
+    render.drawRectFast(cx - R, 0, R * 2, cy - R + 1)
+    render.drawRectFast(cx - R, cy + R - 1, R * 2, H - cy - R + 2)
     local N = 12
     for q = 0, 3 do
         local sx, sy = (q == 0 or q == 3) and 1 or -1, (q < 2) and 1 or -1
@@ -324,12 +324,12 @@ local function scopeOverlay(W, H)
         end
     end
     -- reticle: thick outer posts + thin center cross + mil dots
-    render.drawRect(cx - R, cy - 2, R - 40, 4)
-    render.drawRect(cx + 40, cy - 2, R - 40, 4)
-    render.drawRect(cx - 2, cy + 40, 4, R - 40)
-    render.drawRect(cx - 2, cy - R, 4, R - 40)
-    render.drawRect(cx - 40, cy, 80, 1)
-    render.drawRect(cx, cy - 40, 1, 80)
+    render.drawRectFast(cx - R, cy - 2, R - 40, 4)
+    render.drawRectFast(cx + 40, cy - 2, R - 40, 4)
+    render.drawRectFast(cx - 2, cy + 40, 4, R - 40)
+    render.drawRectFast(cx - 2, cy - R, 4, R - 40)
+    render.drawRectFast(cx - 40, cy, 80, 1)
+    render.drawRectFast(cx, cy - 40, 1, 80)
     for k = 1, 4 do
         render.drawFilledCircle(cx + k * 9, cy, 1.6) render.drawFilledCircle(cx - k * 9, cy, 1.6)
         render.drawFilledCircle(cx, cy + k * 9, 1.6)
@@ -337,6 +337,7 @@ local function scopeOverlay(W, H)
 end
 
 hook.add("drawhud", "it_gunhud", function()
+    pcall(render.setColorModulation, 1, 1, 1) pcall(render.setBlend, 1)   -- world tint leaks into HUD quads
     local h = gunHolo()
     if not h then return end
     local W, H = render.getResolution()
@@ -358,8 +359,8 @@ hook.add("drawhud", "it_gunhud", function()
             local busy = bit.band(gst.flags, 3) ~= 0
             if busy then render.setRGBA(255, 90, 60, 230) else render.setRGBA(120, 255, 120, 230) end
             render.drawCircle(sp.x, sp.y, 9)
-            render.drawRect(sp.x - 18, sp.y, 9, 1) render.drawRect(sp.x + 10, sp.y, 9, 1)
-            render.drawRect(sp.x, sp.y - 18, 1, 9) render.drawRect(sp.x, sp.y + 10, 1, 9)
+            render.drawRectFast(sp.x - 18, sp.y, 9, 1) render.drawRectFast(sp.x + 10, sp.y, 9, 1)
+            render.drawRectFast(sp.x, sp.y - 18, 1, 9) render.drawRectFast(sp.x, sp.y + 10, 1, 9)
             render.drawFilledCircle(sp.x, sp.y, 1.5)
         end
     end
@@ -368,7 +369,7 @@ hook.add("drawhud", "it_gunhud", function()
     local pw, ph = 380, 92
     local x, y = W / 2 - pw / 2, H - ph - 40
     render.setRGBA(0, 0, 0, 165)
-    render.drawRect(x, y, pw, ph)
+    render.drawRectFast(x, y, pw, ph)
     render.setFont(fMed)
     render.setRGBA(170, 220, 130, 255)
     render.drawSimpleText(x + 12, y + 16, g.name .. (zoomLvl > 0 and ("  x" .. math.round(75 / g.zoom[zoomLvl], 1)) or ""), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -381,12 +382,12 @@ hook.add("drawhud", "it_gunhud", function()
     local status
     if bit.band(gst.flags, 1) ~= 0 then
         status = "RELOADING"
-        render.setRGBA(40, 40, 40, 255) render.drawRect(bx, by, bw, 10)
-        render.setRGBA(230, 200, 90, 255) render.drawRect(bx, by, bw * gst.prog, 10)
+        render.setRGBA(40, 40, 40, 255) render.drawRectFast(bx, by, bw, 10)
+        render.setRGBA(230, 200, 90, 255) render.drawRectFast(bx, by, bw * gst.prog, 10)
     elseif g.heatPer > 0 then
-        render.setRGBA(40, 40, 40, 255) render.drawRect(bx, by, bw, 10)
+        render.setRGBA(40, 40, 40, 255) render.drawRectFast(bx, by, bw, 10)
         local over = bit.band(gst.flags, 2) ~= 0
-        render.setRGBA(255, math.floor(220 * (1 - gst.heat)), 50, 255) render.drawRect(bx, by, bw * math.min(gst.heat, 1), 10)
+        render.setRGBA(255, math.floor(220 * (1 - gst.heat)), 50, 255) render.drawRectFast(bx, by, bw * math.min(gst.heat, 1), 10)
         if over then status = "OVERHEAT" end
     elseif bit.band(gst.flags, 4) ~= 0 then
         status = "BOLT"

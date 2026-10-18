@@ -229,7 +229,10 @@ local function placeMesh(it, pos, ang, colFn)
     end
     local ok, p = pcall(prop.createCustom, pos, ang, convexes, true)
     if not ok or not isValid(p) then return nil, tostring(p) end
-    pcall(p.setColor, p, it.color or Color(255, 255, 255))
+    -- the prop itself is invisible (alpha 0) for everyone: every client puts the mesh on it or on its
+    -- own clientside hologram (meshes.lua). The RGB stays = the tint the clients copy.
+    local c = it.color or Color(255, 255, 255)
+    pcall(p.setColor, p, Color(c.r, c.g, c.b, 0))
     return p, nil, rest
 end
 
@@ -469,7 +472,7 @@ net.receive("it_flag", function(len, ply)
     local o = isValid(e) and objs[e]
     if not o or o.it.logic ~= "flag" then return end
     o.label, o.lcol = name, col
-    pcall(e.setColor, e, col)
+    pcall(e.setColor, e, Color(col.r, col.g, col.b, 0))     -- alpha 0: clients copy the RGB to the mesh
 end)
 
 -- ---------------- triggers ----------------

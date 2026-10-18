@@ -93,7 +93,8 @@ local function placeGun(it, pos, ang, lvl)
     if hologram.canSpawn() then
         local h = hologram.create(base:localToWorld(s.pivot), base:getAngles(), HM .. "box.mdl")
         if h then
-            pcall(h.setColor, h, it.partColor or it.color or C_GUN)
+            local c = it.partColor or it.color or C_GUN
+            pcall(h.setColor, h, Color(c.r, c.g, c.b, 0))     -- invisible box; clients draw the mesh (meshes.lua)
             h:setParent(base)
             s.holo, s.hidx = h, h:entIndex()
         end

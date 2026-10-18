@@ -152,30 +152,79 @@ end
 
 -- the server tells clients which mesh definition belongs to an entity
 -- def 255 = C.alias: a hidden extra collision prop that belongs to object "main"
+local function dropHolo(r)
+    if r and r.holo then
+        pcall(function() if isValid(r.holo) then r.holo:remove() end end)
+        r.holo = nil
+    end
+end
 net.receive("it_reg", function()
     local idx, di = net.readUInt(16), net.readUInt(8)
     if di == 255 then C.alias[idx] = net.readUInt(16) return end
     local d = MDEFS[di]
-    if d then C.reg[idx] = { d = d, it = d.it, applied = nil } end
+    if d then
+        dropHolo(C.reg[idx])
+        C.reg[idx] = { d = d, it = d.it, applied = nil }
+    end
 end)
 net.receive("it_unreg", function()
     local idx = net.readUInt(16)
+    dropHolo(C.reg[idx])
     C.reg[idx] = nil
     for k, v in pairs(C.alias) do if v == idx then C.alias[k] = nil end end
 end)
 
 
-local function applyMesh(e, d)
-    local m = meshes[d.idx]
-    if not m then return false end
-    local ok = pcall(function()
-        e:setMesh(m)
-        local mat = getMat(d.mat)
-        if mat then e:setMeshMaterial(mat) end
-        local b = bounds[d.idx]
-        e:setRenderBounds(b[1], b[2])
-    end)
-    return ok
+-- The server makes every prop / gun holo invisible (alpha 0, RGB = tint).
+-- 1) mesh straight on the entity + alpha back to 255: always allowed on the OWNER's client,
+--    on other clients only if their prop protection lets this chip touch the prop
+--    (FPP & co. usually don't -> they saw the bare prop = wireframe material).
+-- 2) otherwise: an own clientside hologram with the mesh, parented to the entity. Clientside
+--    holograms belong to the chip on every client, so this always passes the permission checks.
+local function tintOf(e)
+    local ok, c = pcall(e.getColor, e)
+    if ok and c then return Color(c.r, c.g, c.b, 255) end
+    return Color(255, 255, 255, 255)
+end
+local function meshOn(h, d)
+    h:setMesh(meshes[d.idx])
+    local mat = getMat(d.mat)
+    if mat then h:setMeshMaterial(mat) end
+    local b = bounds[d.idx]
+    h:setRenderBounds(b[1], b[2])
+end
+local function applyMesh(e, r)
+    local d = r.d
+    if not meshes[d.idx] then return false end
+    dropHolo(r)
+    if pcall(function() meshOn(e, d) e:setColor(tintOf(e)) end) then
+        r.mode = "ent"
+        return true
+    end
+    if not hologram.canSpawn() then return false end
+    local ok, h = pcall(hologram.create, e:getPos(), e:getAngles(), HM .. "box.mdl")
+    if not ok or not h then return false end
+    if not pcall(function() meshOn(h, d) h:setColor(tintOf(e)) h:setParent(e) end) then
+        pcall(h.remove, h)
+        return false
+    end
+    r.holo, r.mode, r.tint = h, "holo", tintOf(e)
+    return true
+end
+-- keeps the tint in sync (flag colour changes, the server re-sending alpha 0)
+local function syncTint(e, r)
+    local ok, c = pcall(e.getColor, e)
+    if not ok or not c then return end
+    if r.mode == "ent" then
+        if c.a ~= 255 then pcall(e.setColor, e, Color(c.r, c.g, c.b, 255)) end
+    elseif r.mode == "holo" then
+        if not isValid(r.holo) then r.applied = nil return end
+        local t = r.tint
+        if not t or t.r ~= c.r or t.g ~= c.g or t.b ~= c.b then
+            r.tint = Color(c.r, c.g, c.b, 255)
+            pcall(r.holo.setColor, r.holo, r.tint)
+        end
+    end
 end
 
 local nextApply = 0
@@ -198,9 +247,13 @@ local function meshesThink()
     nextApply = now + 0.5
     for idx, r in pairs(C.reg) do
         local e = entity(idx)
-        if isValid(e) and r.applied ~= e then
-            local c = e:getClass()
-            if (c == "starfall_prop" or c == "starfall_hologram") and applyMesh(e, r.d) then r.applied = e end
+        if isValid(e) then
+            if r.applied ~= e then
+                local c = e:getClass()
+                if (c == "starfall_prop" or c == "starfall_hologram") and applyMesh(e, r) then r.applied = e end
+            else
+                syncTint(e, r)
+            end
         end
     end
 end
