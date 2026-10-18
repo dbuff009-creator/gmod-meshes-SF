@@ -33,7 +33,7 @@ local EMIT_POINTS = 24
 -- every logic that needs a proximity check
 local SENSOR_LOGIC = {
     at = true, ap = true, bounce = true, ied = true, laser = true,
-    alarm = true, clay = true, trip = true, decoy = true, radar = true,
+    alarm = true, clay = true, trip = true, radar = true,
 }
 
 local sensors, cursor = {}, 1
@@ -80,7 +80,6 @@ local function visible(a, e, self)
     return not tr.Hit or tr.Entity == e
 end
 
--- artillery strike around a beacon
 -- recon radar + motion alarm targets -> owner HUD
 local radarPrev, radarTick = 0, 0
 local function sendRadar(now)
@@ -90,7 +89,7 @@ local function sendRadar(now)
     end
     for _, e in ipairs(sensors) do
         local o = objs[e]
-        if isValid(e) and o.armAt and now >= o.armAt then
+        if o and isValid(e) and o.armAt and now >= o.armAt then
             if o.it.logic == "radar" then
                 for _, t in ipairs(find.inSphere(e:getPos(), RADAR_RANGE)) do
                     if isValid(t) and t ~= O and ((t:isPlayer() and t:isAlive()) or t:isNPC()) then add(t) end
@@ -177,19 +176,6 @@ timer.create("it_scan", 0.1, 0, function()
                 local t = tr.Entity
                 if tr.Hit and not tr.HitWorld and isValid(t) and not objs[t] and not extraOf[t] then
                     fuse(e, 0.12, "buttons/button16.wav")
-                end
-            elseif lg == "decoy" then                               -- fake gunfire bursts
-                if now >= (o.nextDecoy or 0) then
-                    local kinds = { { "weapons/ar2/fire1.wav", 0.1, 8 }, { "weapons/smg1/smg1_fire1.wav", 0.08, 10 },
-                                    { "weapons/357/357_fire2.wav", 0.7, 3 }, { "weapons/pistol/pistol_fire2.wav", 0.28, 5 } }
-                    local k = kinds[math.random(1, #kinds)]
-                    local n = math.random(math.max(1, k[3] - 4), k[3])
-                    o.nextDecoy = now + n * k[2] + math.rand(2, 6)
-                    for j = 0, n - 1 do
-                        timer.simple(j * k[2] * math.rand(0.85, 1.2), function()
-                            if isValid(e) and objs[e] then snd(e, k[1], 100, math.random(94, 106), 1) end
-                        end)
-                    end
                 end
             elseif lg == "alarm" then
                 if now >= (o.nextAlarm or 0) then

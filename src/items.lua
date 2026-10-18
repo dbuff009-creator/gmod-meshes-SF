@@ -88,7 +88,7 @@ item{ id = "ied", cat = 1, name = "IED", desc = "Buried, all targets, huge", kin
         cyl(l, V(-9, 7, 2), 2.2, 3, 10)                                    -- shell nose sticking out
     end }
 
-item{ id = "timed", cat = 1, name = "Timed Charge", desc = TIMED_FUSE .. " s, RMB = defuse", kind = "mesh", mat = "plain", color = Color(120, 45, 40),
+item{ id = "timed", cat = 1, name = "Timed Charge", desc = "R = timer, RMB = defuse", kind = "mesh", mat = "plain", color = Color(120, 45, 40),
     place = "surface", logic = "timed",
     col = function(l) box(l, V(-7, -4.5, 0), V(7, 4.5, 4)) end,
     vis = function(l)
@@ -171,16 +171,6 @@ item{ id = "flag", cat = 2, name = "Rally Flag", desc = "Waypoint on your HUD", 
         end
         l[#l + 1] = { t = "quads", q = q }
         box(l, V(-8, -8, 0), V(8, 8, 3))
-    end }
-
-item{ id = "decoy", cat = 2, name = "Sound Decoy", desc = "Fake gunfire bursts", kind = "mesh", mat = "plain", color = Color(75, 80, 62),
-    place = "upright", faceAway = true, logic = "decoy",
-    col = function(l) box(l, V(-7, -6, 0), V(7, 6, 14)) end,
-    vis = function(l)
-        box(l, V(-7, -6, 0), V(6, 6, 13))
-        ocyl(l, V(6, 0, 6.5), V(9, 0, 6.5), 5, 16)                         -- speaker cone
-        ocyl(l, V(9, 0, 6.5), V(9.4, 0, 6.5), 2, 12)
-        box(l, V(-6, -1, 13), V(-4, 1, 14)) ocyl(l, V(-5, 0, 14), V(-5, 0, 34), 0.3, 6)
     end }
 
 -- ---------------- manned guns: base (custom prop) + gun part (hologram) ----------------
@@ -345,20 +335,23 @@ local function mortarPart(l)
     ocyl(l, V(-4, 0, 0), V(44, 0, 0), 3.2, 14)                 -- tube
     ocyl(l, V(44, 0, 0), V(47, 0, 0), 3.8, 14)
     ocyl(l, V(-7, 0, 0), V(-4, 0, 0), 3.7, 12)                 -- breech cap
-    ocyl(l, V(24, 0, 0), V(27, 0, 0), 4, 12)                   -- bipod collar
+    ocyl(l, V(24, 0, 0), V(27, 0, 0), 4, 12)                   -- collar
+    box(l, V(6, -1.5, 3.2), V(14, 1.5, 6.5))                   -- sight
+    box(l, V(10, -0.5, 6.5), V(12, 0.5, 9))
 end
 local function mortarBase(l)
     cyl(l, V(0, 0, 0), 15, 3, 18)                              -- baseplate
     cyl(l, V(0, 0, 3), 4.5, 5, 12)                             -- socket
-    ocyl(l, V(15, 0, 28), V(22, 11, 0), 0.9, 8)                -- bipod
-    ocyl(l, V(15, 0, 28), V(22, -11, 0), 0.9, 8)
-    ocyl(l, V(15, 0, 28), V(19, 0, 2), 1.2, 8)                 -- elevating screw
+    for k = 0, 3 do                                            -- stiffening ribs on the baseplate
+        local a = k * math.pi / 2 + math.pi / 4
+        box(l, V(math.cos(a) * 6 - 1, math.sin(a) * 6 - 1, 3), V(math.cos(a) * 13 + 1, math.sin(a) * 13 + 1, 4.5))
+    end
     box(l, V(-30, 14, 0), V(-12, 30, 9))                       -- shell crate
     for k = 0, 3 do ocyl(l, V(-27 + k * 4.5, 22, 9), V(-27 + k * 4.5, 22, 20), 1.6, 8) end
     ammoStool(l, -40)
 end
 item{ id = "mortar", cat = 3, name = "Mortar", desc = "Drone cam, wheel = angle", kind = "gun", gun = "mortar",
-    mat = "metal", color = Color(78, 84, 70), place = "upright", faceAway = true, grid = true,
+    mat = "plain", color = Color(112, 120, 82), partMat = "plain", partColor = Color(86, 112, 60), place = "upright", faceAway = true, grid = true,
     col = function(l) cyl(l, V(0, 0, 0), 15, 8, 10) box(l, V(-48, -9, 0), V(-32, 9, 14)) end,
     vis = mortarBase, part = mortarPart }
 
@@ -564,13 +557,14 @@ local function shelterShape(doors, vis, cover)
         local door = {}
         for _, k in ipairs(doors) do door[k] = true end
         local function M(axis, u, v, z) if axis == "x" then return V(u, v, z) else return V(v, u, z) end end
-        local function seg(axis, s, u0, u1, f0, f1)                       -- wall core + outer slope piece
+        local function seg(axis, s, u0, u1, f0, f1, t0, t1)               -- wall core + outer slope piece
             local b0, b1 = math.min(s * S, s * c), math.max(s * S, s * c)
             hex(l, { M(axis, u0, b0, Z0), M(axis, u1, b0, Z0), M(axis, u1, b1, Z0), M(axis, u0, b1, Z0),
                      M(axis, u0, b0, WT), M(axis, u1, b0, WT), M(axis, u1, b1, WT), M(axis, u0, b1, WT) })
             local i, o = s * c, s * out
+            t0, t1 = t0 or u0, t1 or u1                                    -- top edge of the slope (door side: stops at the trench wall)
             hex(l, { M(axis, f0, i, Z0), M(axis, f1, i, Z0), M(axis, f1, o, Z0), M(axis, f0, o, Z0),
-                     M(axis, u0, i, H),  M(axis, u1, i, H),  M(axis, f1, o, 0),  M(axis, f0, o, 0) })
+                     M(axis, t0, i, H),  M(axis, t1, i, H),  M(axis, f1, o, 0),  M(axis, f0, o, 0) })
             if vis then
                 for row = 0, closed and 3 or 0 do
                     local u = u0 + 11 + ((row % 2 == 1) and 11 or 0)
@@ -588,10 +582,25 @@ local function shelterShape(doors, vis, cover)
                 end
             end
         end
+        -- door passage cheek: continues the adjoining trench's wall core from the cell edge (B) to the
+        -- shelter wall (c), full wall height -> no hole between the trench and the shelter roof
+        local function cheek(axis, s, u0, u1)
+            local v0, v1 = math.min(s * c, s * B), math.max(s * c, s * B)
+            hex(l, { M(axis, u0, v0, Z0), M(axis, u1, v0, Z0), M(axis, u1, v1, Z0), M(axis, u0, v1, Z0),
+                     M(axis, u0, v0, WT), M(axis, u1, v0, WT), M(axis, u1, v1, WT), M(axis, u0, v1, WT) })
+            if vis then
+                for row = 0, closed and 3 or 0 do
+                    bag(l, M(axis, (u0 + u1) / 2, s * (c + B) / 2, H - 1 + row * 7), axis == "x" and 90 or 0, 22, 12, 8)
+                end
+            end
+        end
         local function side(axis, s, hasDoor)
             if not hasDoor then seg(axis, s, -c, c, -out, out) return end
-            seg(axis, s, -c, DY - ch, -out, DY - ch)
-            seg(axis, s, DY + ch, c, DY + ch, out)
+            local e0, e1 = DY - ch, DY + ch                                -- door opening
+            local k0, k1 = e0 - tw, e1 + tw                                -- outer faces of the trench walls
+            seg(axis, s, -c, e0, -out, k0, -c, k0)
+            seg(axis, s, e1, c, k1, out, k1, c)
+            cheek(axis, s, k0, e0) cheek(axis, s, e1, k1)
         end
         side("x", 1, false) side("x", -1, false)                          -- +Y / -Y walls
         side("y", 1, door.px) side("y", -1, door.nx)                      -- +X / -X walls (doors)
@@ -953,7 +962,7 @@ end
 for _, it in ipairs(ITEMS) do
     if it.kind == "mesh" or it.kind == "gun" then it.mdef = mdef(it.id, it.vis or it.col, it.mat, it) end
     if it.kind == "gun" then
-        it.gdef = mdef(it.id .. ":gun", it.part, "metal", nil)
+        it.gdef = mdef(it.id .. ":gun", it.part, it.partMat or "metal", nil)
         if it.mountVis then
             it.mountDefs = {}
             for k, fn in ipairs(it.mountVis) do it.mountDefs[k] = mdef(it.id .. ":m" .. k, fn, it.mat, it) end

@@ -281,7 +281,7 @@ local function trenchOverlaps(pos, ang, it)
     return hit
 end
 
-local function doPlace(it, pos, ang, normal, lvl, rep)
+local function doPlace(it, pos, ang, normal, lvl, rep, opt)
     local now = timer.curtime()
     if now - S.lastPlace < PLACE_COOLDOWN * 0.8 then return end
     if MAX_OBJECTS > 0 and countObjs() >= MAX_OBJECTS then sendState("Object limit: " .. MAX_OBJECTS) return end
@@ -345,10 +345,11 @@ local function doPlace(it, pos, ang, normal, lvl, rep)
             end
         end
     elseif it.logic == "timed" then
-        o.fuseAt, o.nextBeep, o.armAt = now + TIMED_FUSE, now, nil
+        local fuseT = (opt and opt >= 3) and math.min(opt, 300) or TIMED_FUSE     -- timer chosen with R on the client
+        o.fuseAt, o.nextBeep, o.armAt = now + fuseT, now, nil
         S.fused[#S.fused + 1] = p
     end
-    if it.logic == "alarm" or it.logic == "radar" or it.logic == "decoy" then
+    if it.logic == "alarm" or it.logic == "radar" then
         o.armAt = now + 1
         snd(p, "buttons/blip1.wav", 70, 120, 0.8)
     elseif it.logic == "timed" then
@@ -444,10 +445,11 @@ net.receive("it_cmd", function(len, ply)
         local pos, ang, n = net.readVector(), net.readAngle(), net.readVector()
         local lvl = net.readUInt(4)
         local rep = net.readUInt(16)
+        local opt = net.readUInt(9)                                   -- timed charge: fuse seconds
         local it = ITEMS[idx]
         if it and it.kind ~= "cover" then
             if it.kind ~= "gun" or not it.mountDefs or lvl > #MOUNT_LEVELS then lvl = 0 end
-            doPlace(it, pos, ang, n, lvl, rep)
+            doPlace(it, pos, ang, n, lvl, rep, opt)
         end
     elseif act == 2 then
         local b, n = net.readVector(), net.readVector()
@@ -455,6 +457,19 @@ net.receive("it_cmd", function(len, ply)
     elseif act == 3 then
         removeAimed()
     end
+end)
+
+-- rally flag: name + colour from the owner (E on the flag), the flag itself is tinted
+net.receive("it_flag", function(len, ply)
+    if ply ~= O then return end
+    local idx = net.readUInt(16)
+    local name = string.sub(net.readString(), 1, 20)
+    local col = Color(net.readUInt(8), net.readUInt(8), net.readUInt(8))
+    local e = entity(idx)
+    local o = isValid(e) and objs[e]
+    if not o or o.it.logic ~= "flag" then return end
+    o.label, o.lcol = name, col
+    pcall(e.setColor, e, col)
 end)
 
 -- ---------------- triggers ----------------

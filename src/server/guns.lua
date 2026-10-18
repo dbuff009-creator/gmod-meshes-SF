@@ -93,7 +93,7 @@ local function placeGun(it, pos, ang, lvl)
     if hologram.canSpawn() then
         local h = hologram.create(base:localToWorld(s.pivot), base:getAngles(), HM .. "box.mdl")
         if h then
-            pcall(h.setColor, h, it.color or C_GUN)
+            pcall(h.setColor, h, it.partColor or it.color or C_GUN)
             h:setParent(base)
             s.holo, s.hidx = h, h:entIndex()
         end

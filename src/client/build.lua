@@ -39,7 +39,10 @@ local B = {
     waitRelease = false, lastPlaceCl = 0, selectorUntil = 0,
     plan = nil,                 -- current placement {ok, pos, ang, normal, reason, stack}
     camIdx = 0, camCount = 0,
+    fuse = CC.TIMED_FUSE,       -- timed charge timer (R / Shift+R)
 }
+local FUSES = { 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300 }
+B.FUSES = FUSES
 
 
 net.receive("it_state", function()
@@ -83,12 +86,13 @@ end
 
 hook.add("think", "it_menukey", function()
     local q = pressedOnce(KEY_MENU)
-    if not C.holding then return end
+    if not C.holding or C.flagEdit then return end
     if q then toggleMenu() end
 end)
 
 -- block the bugbait attack + use Q for our menu
 hook.add("inputbindpressed", "it_binds", function(bind)
+    if C.flagEdit then return true end          -- typing a flag name: no movement, no binds
     if not C.holding then return end
     local b = string.lower(bind)
     if string.find(b, "invnext", 1, true) or string.find(b, "invprev", 1, true) or string.find(b, "slot", 1, true) then
@@ -395,6 +399,7 @@ local function sendPlace(it, p)
     net.writeVector(p.normal or V(0, 0, 1))
     net.writeUInt(p.lvl or 0, 4)
     net.writeUInt(p.replace or 0, 16)
+    net.writeUInt(it.logic == "timed" and B.fuse or 0, 9)
     net.send()
 end
 local function sendSimple(act)
@@ -402,6 +407,9 @@ local function sendSimple(act)
     net.writeUInt(act, 4)
     net.send()
 end
+
+-- hud.lua calls this after its own cursor UI (flag editor) closes
+function B.uiClosed() B.waitRelease = true end
 
 local function okColor(ok, a) return ok and Color(80, 255, 80, a) or Color(255, 60, 60, a) end
 local function hideGhosts()
@@ -429,7 +437,7 @@ hook.add("think", "it_input", function()
         if not lmbDown then B.waitRelease = false end
         lmb = false
     end
-    if B.menuOpen or timer.realtime() < B.selectorUntil then
+    if B.menuOpen or C.flagEdit or timer.realtime() < B.selectorUntil then
         hideGhosts()
         return
     end
@@ -439,6 +447,12 @@ hook.add("think", "it_input", function()
         if B.selected.place == "trench" then
             if B.trenchOrigin then B.trenchRot = (B.trenchRot + (shift and -1 or 1)) % 4
             else B.trenchYaw = B.trenchYaw + (shift and -ROT_FINE or ROT_FINE) end
+        elseif B.selected.logic == "timed" then        -- timed charge: R = timer
+            local k = 1
+            for i, f in ipairs(FUSES) do if f <= B.fuse then k = i end end
+            k = shift and (k - 2) % #FUSES + 1 or k % #FUSES + 1
+            B.fuse = FUSES[k]
+            say("Timer " .. B.fuse .. " s")
         else
             B.rot = B.rot + (shift and -ROT_STEP or ROT_STEP)
         end
