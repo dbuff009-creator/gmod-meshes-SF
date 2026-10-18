@@ -10,7 +10,7 @@
 
 | Файл | Что делает |
 | --- | --- |
-| `infantry_tool.lua` | главный чип: директива `--@name`, 12 `--@include` + `require()` |
+| `infantry_tool.lua` | главный чип: директива `--@name`, блок настроек `CFG`, 12 `--@include` + `require()` |
 | `src/config.lua` | настройки: дальности, тайминги, лимиты, материалы (`--@shared`) |
 | `src/geom.lua` | примитивы (box/cyl/frustum/hex/bag…) и выпуклые оболочки (`--@shared`) |
 | `src/shared.lua` | общие хелперы: тени, звук, углы, ранг предметов (`--@shared`) |
@@ -26,7 +26,9 @@
 
 `tools/` — только для разработки (в игру не грузится): `split.py` — генератор
 модулей из исходника, `mock.lua` + `smoke.lua` + `smoke.py` — тесты на моке
-Starfall, `apicheck.py` / `lint_names.py` — проверки API и имён.
+Starfall, `apicheck.py` / `lint_names.py` — проверки API и имён,
+`make_chip.py` — пересборка блока `CFG` в чипе, `directives.py` — проверка
+`--@`-директив так, как их видит препроцессор Starfall.
 
 ## Установка
 
@@ -67,12 +69,39 @@ Starfall, `apicheck.py` / `lint_names.py` — проверки API и имён.
 * Cover-предметы (навес/маскировка) не создают новый объект — они
   переделывают уже стоящий тренч.
 
+## Настройки в чипе
+
+Все параметры (`CFG`) лежат в самом `infantry_tool.lua` между маркерами
+`-- >>> CFG-BEGIN` / `-- <<< CFG-END` — дальности, тайминги, лимиты, статы
+орудий, материалы. Блок применяется поверх `src/config.lua` **до** загрузки
+модулей, поэтому `require()` отдаёт модулям уже переопределённую таблицу:
+править можно прямо в редакторе Starfall, без изменений в репозитории.
+Удалённая строка означает «взять значение модуля».
+
+```bash
+python3 tools/make_chip.py            # пересобрать блок из src/config.lua
+python3 tools/make_chip.py --check    # только проверить синхронность
+```
+
+`src/config.lua` остаётся источником значений по умолчанию; генератор
+переносит их в чип вместе с комментариями.
+
 ## Тесты
 
 ```bash
-python3 tools/smoke.py        # mock-прогон сервера и клиента: 66 checks, 0 failed
+python3 tools/directives.py   # директивы препроцессора: 0 problem(s)
+python3 tools/smoke.py        # mock-прогон сервера и клиента: 68 checks, 0 failed
 python3 tools/apicheck.py /tmp/sf-src   # сверка вызовов с исходниками StarfallEx
 ```
+
+`tools/smoke.py` запускает Lua-мок через [lupa](https://pypi.org/project/lupa/);
+если модуля нет: `python3 -m venv .venv && .venv/bin/pip install lupa`, затем
+`.venv/bin/python tools/smoke.py`.
+
+`tools/directives.py` повторяет разбор препроцессора (`--@директива` ищется
+регуляркой по всему тексту, включая комментарии): он ловит конфликт
+`--@server` / `--@client` / `--@shared` и фальшивые `--@include` внутри
+док-шапки — ровно ту ошибку, из-за которой чип раньше не компилировался.
 
 `tools/split.py` — единственный источник `src/`: правки вносятся в шаблон
 генератора, а не в сгенерированные файлы (регенерация перезапишет их).
