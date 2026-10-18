@@ -149,7 +149,7 @@ hook.add("drawhud", "it_hud", function()
     if not C.holding then return end
     local W, H = render.getResolution()
     if B.menuOpen then drawMenu(W, H) return end
-    if camViewEnt then
+    if C.camViewEnt then
         render.setRGBA(0, 0, 0, 160)
         render.drawRect(W / 2 - 150, 30, 300, 40)
         render.setFont(fMed)
