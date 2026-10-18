@@ -1,0 +1,3614 @@
+--@name Infantry Tool (bugbait)
+--@author SF KB
+--@shared
+
+--[[
+    INFANTRY TOOL v4 on weapon_bugbait - a soldier's build tool with its own spawn menu.
+
+    Holding weapon_bugbait:
+      Q          - open / close the tool menu (2 categories: TOOLS = mines, charges, guns; PROPS = fortifications)
+      LMB        - place the selected item (ghost preview: green = ok, red = not allowed)
+      RMB        - remove your object under the crosshair (or cancel an unfinished tripwire)
+      R / Shift+R- rotate (+/-). Trenches: 90 deg on their grid
+      G          - grid on/off for props.   Shift+G - reset the trench grid
+      X          - detonate all C4
+
+    TOOLS: AT mine, AP mine, Tripwire grenade (2 clicks), Claymore, C4 (X), Smoke pot,
+           MANNED Machine gun, MANNED Sniper rifle.
+    PROPS: Czech hedgehog, Dragon's teeth, Trench pieces on their own grid (straight / corner / T /
+           cross / end / exit ramp), Sandbags (wall / low / arc / corner - round bags, STACKABLE),
+           MG nest, Barbed wire, Watchtower (stairs + railing), Pillbox, Concrete T-wall,
+           Log barricade, Supply crate (stackable).
+
+    Stacking: aim at a sandbag piece / crate with another stackable item selected -> the ghost
+    snaps exactly on top of it (same direction, R turns it). Build walls as high as you want.
+
+    Manned guns (anyone can use them, not only you):
+      walk to the gun and press E on the seat behind it (a little ammo box).
+      LMB fire   RMB zoom (sniper: 2 zoom levels + scope)   R reload   E leave.
+      The gun turns to where you look (limited arc + turn speed), MG overheats, ammo + reload.
+      Bullets: game.bulletDamage from the gun muzzle. Server limits: 40 bullets/s and
+      100 damage/s per chip owner (SF burst limits) - one MG at full fire uses ~90 dmg/s.
+
+    How it works:
+      * Everything is a custom prop (prop.createCustom): real collision, no hologram limit.
+        Every client builds a textured mesh per item ONCE (in a coroutine, no CPU spikes)
+        and applies it with Entity:setMesh. The gun body is 1 server hologram with a mesh.
+      * All text is ASCII (no Cyrillic in the SF editor / Roboto font).
+]]
+
+-- ============================ SETTINGS ============================
+local WEAPON_CLASS   = "weapon_bugbait"
+local KEY_MENU_BIND  = "+menu"          -- Q: blocked spawn menu bind while holding the tool
+local KEY_ROTATE     = KEY.R
+local KEY_GRID       = KEY.G
+local KEY_DETONATE   = KEY.X
+local KEY_MENU       = KEY.Q             -- raw key for the menu (works even when the cursor has focus)
+
+local PLACE_RANGE    = 300
+local MAX_OBJECTS    = 0                -- 0 = no limit of your own (SF server limits: props, prop burst 4/s, custom prop vertices)
+local PLACE_COOLDOWN = 0.3              -- props spawn burst is 4/s
+local ARM_TIME       = 2                -- mines arm after this
+local OWNER_SAFE     = false            -- true = your own mines ignore you
+local SHOOTABLE      = true             -- mines / C4 / claymore explode when shot
+local USE_WIRE_EXPLOSIVE = true         -- gmod_wire_explosive (as in your missile), else game.blastDamage
+local TIMED_FUSE     = 15               -- timed charge countdown
+local LASER_RANGE    = 400              -- laser mine beam length
+local RADAR_RANGE    = 1600             -- recon radar: enemies inside this radius are shown on your HUD
+local ALARM_RANGE    = 260              -- motion alarm detection radius (needs line of sight)
+local KEY_CAM        = KEY.B            -- periscope cameras: B = next camera / off
+-- mortar (drone camera, idea + ballistics from "Mortar Predictive")
+local MORTAR_MIN     = 400              -- min target distance
+local MORTAR_MAX     = 9000             -- max target / camera distance from the mortar
+local MORTAR_CAM_H   = 900              -- drone camera start height over the mortar
+local MORTAR_MARKERS = true             -- show players / NPCs the drone camera can see
+
+local TRENCH_CELL    = 192              -- trench grid cell
+local TRENCH_WIDTH   = 96               -- channel width (inside)
+local TRENCH_DEPTH   = 72               -- parapet height: standing player is covered, fire step lets you shoot over
+local TRENCH_SPILL   = 60               -- outer earth slope beyond the cell (walkable, so you can climb onto it)
+local TRENCH_FIRE_STEP = true           -- 18-unit step along one wall of straight pieces
+local ROOF_Z         = 26               -- plank roof height over the parapet (the gap is a firing slit)
+local MESH_TWO_SIDED = false            -- true = draw every face from both sides (2x triangles; only if things look inside-out)
+local MESH_CPU       = 0.35             -- share of the CPU quota per frame used to build meshes
+local PROP_GRIDS     = { 32, 16, 64, 8 } -- prop grid sizes (Shift+G cycles), grid aligns to your nearest object
+local ROT_STEP       = 45               -- R / Shift+R
+local ROT_FINE       = 15               -- free rotation of the very first trench (before the grid exists)
+
+-- manned guns
+local SEAT_MODEL     = "models/nova/airboat_seat.mdl"
+local SEAT_HIDDEN    = true             -- the gunner sits on the ammo box of the gun model
+local GUN_STATS = {
+    mg     = { name = "MG", rate = 0.1, dmg = 9, spread = 0.02, mag = 100, reload = 3.5, auto = true,
+               heatPer = 0.028, cool = 0.12,               -- ~60 rounds of continuous fire -> overheat
+               yaw = 75, up = 30, down = 18, turn = 240,    -- arc (deg), turn speed (deg/s)
+               force = 3, zoom = { 50 },
+               snd = "weapons/ar2/fire1.wav", pitch = 72, lvl = 110, flash = 2, tracer = "Tracer", tracerEvery = 2,
+               rel1 = "weapons/ar2/ar2_magout.wav", rel2 = "weapons/ar2/ar2_magin.wav" },
+    sniper = { name = "SNIPER", rate = 1.4, dmg = 95, spread = 0.0005, mag = 5, reload = 3.2, auto = false,
+               heatPer = 0, cool = 1,
+               yaw = 55, up = 25, down = 20, turn = 200,
+               force = 20, zoom = { 20, 7 },
+               snd = "npc/sniper/sniper1.wav", pitch = 100, lvl = 140, flash = 6, tracer = "AirboatGunHeavyTracer", tracerEvery = 1,
+               bolt = "weapons/shotgun/shotgun_cock.wav",
+               rel1 = "weapons/357/357_reload1.wav", rel2 = "weapons/357/357_reload4.wav" },
+    -- one shell, armour piercing + blast at the hit point
+    atgun  = { name = "AT GUN", rate = 1, dmg = 100, spread = 0.001, mag = 1, reload = 3, auto = false,
+               heatPer = 0, cool = 1, yaw = 35, up = 15, down = 8, turn = 50, force = 60, zoom = { 30, 12 },
+               blast = { r = 150, d = 250 },
+               snd = "weapons/357/357_fire2.wav", pitch = 45, lvl = 150, flash = 5, tracer = "AirboatGunHeavyTracer", tracerEvery = 1,
+               rel1 = "physics/metal/metal_box_impact_hard1.wav", rel2 = "weapons/shotgun/shotgun_cock.wav" },
+    -- indirect fire: drone camera, fixed tube angle (wheel / RMB), speed computed for the target
+    mortar = { name = "MORTAR", mortar = { g = 600, r = 280, d = 200 }, ownView = true,
+               rate = 1, dmg = 0, spread = 0, mag = 1, reload = 3, auto = false,
+               heatPer = 0, cool = 1, yaw = 180, up = 85, down = -20, turn = 90, force = 0, zoom = {},
+               snd = "weapons/mortar/mortar_fire1.wav", pitch = 100, lvl = 120, flash = 1,
+               rel1 = "physics/metal/metal_canister_impact_soft1.wav", rel2 = "weapons/shotgun/shotgun_cock.wav" },
+    -- twin anti-air: fast, small blast on every hit (air vehicles), high elevation
+    flak   = { name = "FLAK 2x", rate = 0.12, dmg = 11, spread = 0.015, mag = 80, reload = 4.5, auto = true, twin = true,
+               heatPer = 0.018, cool = 0.14, yaw = 120, up = 80, down = 10, turn = 160, force = 4, zoom = { 40 },
+               blast = { r = 90, d = 22, small = true },
+               snd = "weapons/ar2/fire1.wav", pitch = 55, lvl = 120, flash = 2, tracer = "Tracer", tracerEvery = 1,
+               rel1 = "weapons/ar2/ar2_magout.wav", rel2 = "weapons/ar2/ar2_magin.wav" },
+}
+
+local BLOCK_BUGBAIT  = true
+local HIDE_BUGBAIT   = true             -- hide the bug viewmodel / world model
+local SELECTOR_WINDOW = 3
+local PANEL_Y_FRAC   = 0.55
+
+-- materials (if one is missing on your server it falls back to debugwhite + color)
+local MAT = {
+    metal    = "phoenix_storms/metalset_1-2",
+    concrete = "phoenix_storms/concrete0",
+    dirt     = "models/props_wasteland/dirtwall001a",
+    fabric   = "models/props_c17/furniturefabric003a",
+    wood     = "models/props_wasteland/wood_fence01a",
+    plain    = "models/debug/debugwhite",
+}
+-- ==================================================================
+
+local HM = "models/starfall/holograms/"
+local V = Vector
+
+local function clamp(v, a, b) return v < a and a or (v > b and b or v) end
+
+local function holdsTool(ply)
+    if not isValid(ply) or not ply:isAlive() or ply:inVehicle() then return false end
+    local w = ply:getActiveWeapon()
+    return isValid(w) and w:getClass() == WEAPON_CLASS
+end
+
+-- ============================ GEOMETRY (shared) ============================
+-- prims: {t="hex", p={8 corners: bottom 1-4, top 5-8}} | {t="cyl", c=bottomCenter, r, h, n}
+--        {t="ocyl", a, b, r, n} (cylinder between two points) | {t="quads", q={{a,b,c,d}...}}
+--        {t="sq", q={{a,b,c,d, na,nb,nc,nd}...}} (smooth quads with vertex normals, visual only)
+local function hex(list, p) list[#list + 1] = { t = "hex", p = p } end
+
+local function box(list, mn, mx)
+    hex(list, {
+        V(mn.x, mn.y, mn.z), V(mx.x, mn.y, mn.z), V(mx.x, mx.y, mn.z), V(mn.x, mx.y, mn.z),
+        V(mn.x, mn.y, mx.z), V(mx.x, mn.y, mx.z), V(mx.x, mx.y, mx.z), V(mn.x, mx.y, mx.z),
+    })
+end
+
+-- oriented box: center c, axes ax/ay/az (unit), half sizes hx/hy/hz
+local function obox(list, c, ax, ay, az, hx, hy, hz)
+    local function P(sx, sy, sz) return c + ax * (sx * hx) + ay * (sy * hy) + az * (sz * hz) end
+    hex(list, { P(-1, -1, -1), P(1, -1, -1), P(1, 1, -1), P(-1, 1, -1), P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1) })
+end
+
+-- box rotated by yaw around Z (for arcs)
+local function ybox(list, c, yaw, hx, hy, hz)
+    local a = Angle(0, yaw, 0)
+    obox(list, c, a:getForward(), -a:getRight(), V(0, 0, 1), hx, hy, hz)
+end
+
+-- beam box between two points (planks, braces)
+local function beam(list, a, b, hw, hh)
+    local d = b - a
+    local len = d:getLength()
+    local f = d / len
+    local s = f:cross(math.abs(f.z) < 0.95 and V(0, 0, 1) or V(1, 0, 0)):getNormalized()
+    local u = s:cross(f):getNormalized()
+    obox(list, (a + b) / 2, f, s, u, len / 2, hw, hh)
+end
+
+-- frustum: base bx*by at z0, top tx*ty at z0+h
+local function frustum(list, cx, cy, z0, bx, by, tx, ty, h)
+    hex(list, {
+        V(cx - bx, cy - by, z0), V(cx + bx, cy - by, z0), V(cx + bx, cy + by, z0), V(cx - bx, cy + by, z0),
+        V(cx - tx, cy - ty, z0 + h), V(cx + tx, cy - ty, z0 + h), V(cx + tx, cy + ty, z0 + h), V(cx - tx, cy + ty, z0 + h),
+    })
+end
+
+local function cyl(list, c, r, h, n) list[#list + 1] = { t = "cyl", c = c, r = r, h = h, n = n or 12 } end
+local function ocyl(list, a, b, r, n) list[#list + 1] = { t = "ocyl", a = a, b = b, r = r, n = n or 10 } end
+
+local function ocylBasis(a, b)
+    local d = (b - a):getNormalized()
+    local e1 = d:cross(math.abs(d.z) < 0.9 and V(0, 0, 1) or V(1, 0, 0)):getNormalized()
+    local e2 = d:cross(e1):getNormalized()
+    return e1, e2
+end
+
+-- ROUND sandbag: superellipsoid pillow with smooth normals (visual only)
+local BAG_NU, BAG_NV = 10, 5
+local function spow(v, e) if v < 0 then return -((-v) ^ e) end return v ^ e end
+local function bag(list, c, yaw, l, w, h)
+    local an = Angle(0, yaw, 0)
+    local ax, ay, az = an:getForward(), -an:getRight(), V(0, 0, 1)
+    local A, B, C = l * 0.5, w * 0.5, h * 0.5
+    local E1, E2 = 0.55, 0.32        -- vertical / plan squareness (1 = ellipsoid, -> 0 = box)
+    local P, N = {}, {}
+    for j = 0, BAG_NV do
+        local v = -math.pi / 2 + math.pi * j / BAG_NV
+        local cv, sv = math.cos(v), math.sin(v)
+        if j == 0 or j == BAG_NV then cv = 0 end
+        P[j], N[j] = {}, {}
+        for i = 0, BAG_NU - 1 do
+            local u = math.pi * 2 * i / BAG_NU + math.pi / BAG_NU
+            local cu, su = math.cos(u), math.sin(u)
+            local x = A * spow(cv, E1) * spow(cu, E2)
+            local y = B * spow(cv, E1) * spow(su, E2)
+            local z = C * spow(sv, E1)
+            P[j][i] = c + ax * x + ay * y + az * (z + C)
+            local nx = spow(cv, 2 - E1) * spow(cu, 2 - E2) / A
+            local ny = spow(cv, 2 - E1) * spow(su, 2 - E2) / B
+            local nz = spow(sv, 2 - E1) / C
+            local n = ax * nx + ay * ny + az * nz
+            if n:getLength() < 1e-6 then n = az * (sv < 0 and -1 or 1) end
+            N[j][i] = n:getNormalized()
+        end
+    end
+    local q = {}
+    for j = 0, BAG_NV - 1 do
+        for i = 0, BAG_NU - 1 do
+            local i2 = (i + 1) % BAG_NU
+            q[#q + 1] = { P[j][i], P[j][i2], P[j + 1][i2], P[j + 1][i], N[j][i], N[j][i2], N[j + 1][i2], N[j + 1][i] }
+        end
+    end
+    list[#list + 1] = { t = "sq", q = q }
+end
+
+-- row(s) of sandbags along X from x0 to x1 at y, layer count (bricked)
+local BAG_L, BAG_W, BAG_H = 22, 13, 8
+local function bagRow(list, x0, x1, y, z, layers)
+    for k = 0, layers - 1 do
+        local off = (k % 2 == 1) and BAG_L * 0.5 or 0
+        local x = x0 + BAG_L * 0.5 + off
+        while x + BAG_L * 0.5 <= x1 + 0.1 do
+            bag(list, V(x, y, z + k * (BAG_H - 1)), 0, BAG_L, BAG_W, BAG_H)
+            x = x + BAG_L
+        end
+    end
+end
+local function bagRowY(list, y0, y1, x, z, layers)
+    for k = 0, layers - 1 do
+        local off = (k % 2 == 1) and BAG_L * 0.5 or 0
+        local y = y0 + BAG_L * 0.5 + off
+        while y + BAG_L * 0.5 <= y1 + 0.1 do
+            bag(list, V(x, y, z + k * (BAG_H - 1)), 90, BAG_L, BAG_W, BAG_H)
+            y = y + BAG_L
+        end
+    end
+end
+local function stackH(layers) return layers * (BAG_H - 1) + 1 end
+
+-- convex point list for a prim (server collision)
+local function primPoints(pr)
+    if pr.t == "hex" then return pr.p end
+    if pr.t == "cyl" then
+        local pts = {}
+        for i = 0, pr.n - 1 do
+            local a = i / pr.n * math.pi * 2
+            local x, y = math.cos(a) * pr.r, math.sin(a) * pr.r
+            pts[#pts + 1] = pr.c + V(x, y, 0)
+            pts[#pts + 1] = pr.c + V(x, y, pr.h)
+        end
+        return pts
+    end
+    if pr.t == "ocyl" then
+        local e1, e2 = ocylBasis(pr.a, pr.b)
+        local pts = {}
+        for i = 0, pr.n - 1 do
+            local a = i / pr.n * math.pi * 2
+            local o = e1 * (math.cos(a) * pr.r) + e2 * (math.sin(a) * pr.r)
+            pts[#pts + 1] = pr.a + o
+            pts[#pts + 1] = pr.b + o
+        end
+        return pts
+    end
+end
+
+-- ============================ ITEMS ============================
+-- categories (menu tabs)
+local CAT_NAMES = { "MINES", "GEAR", "TURRETS", "TRENCHES", "FORTS", "OBSTACLES" }
+-- kind: mesh (custom prop) | gun (custom prop + hologram + seat) | tripwire
+-- place: surface (align to surface) | upright (yaw only) | trench (trench grid)
+-- stack = height of the top surface -> other stackable items snap onto it
+local ITEMS = {}
+local function item(t) ITEMS[#ITEMS + 1] = t t.idx = #ITEMS return t end
+
+local C_OLIVE, C_TAN, C_STEEL, C_CONC, C_DIRT = Color(95, 105, 65), Color(190, 170, 120), Color(110, 110, 115), Color(175, 172, 165), Color(150, 125, 95)
+local C_WOOD, C_GUN = Color(150, 115, 80), Color(70, 72, 68)
+
+item{ id = "at", cat = 1, name = "AT Mine", desc = "Vehicles only, big blast", kind = "mesh", mat = "metal", color = C_OLIVE,
+    place = "surface", logic = "at",
+    col = function(l) cyl(l, V(0, 0, 0), 14, 5, 12) end,
+    vis = function(l) cyl(l, V(0, 0, 0), 14, 4, 20) cyl(l, V(0, 0, 4), 11, 1.5, 20) cyl(l, V(0, 0, 5.5), 4, 2, 12) end }
+
+item{ id = "ap", cat = 1, name = "AP Mine", desc = "Infantry, small blast", kind = "mesh", mat = "metal", color = Color(80, 85, 60),
+    place = "surface", logic = "ap",
+    col = function(l) cyl(l, V(0, 0, 0), 5, 3, 8) end,
+    vis = function(l) cyl(l, V(0, 0, 0), 5, 2.5, 14) cyl(l, V(0, 0, 2.5), 1.5, 1.5, 8) end }
+
+item{ id = "bounce", cat = 1, name = "Bounding Mine", desc = "Jumps up, then blasts", kind = "mesh", mat = "metal", color = Color(85, 90, 70),
+    place = "surface", logic = "bounce",
+    col = function(l) cyl(l, V(0, 0, 0), 5.5, 7, 8) end,
+    vis = function(l)
+        cyl(l, V(0, 0, 0), 5.5, 6, 14) cyl(l, V(0, 0, 6), 1.2, 1.5, 8)
+        for k = 0, 2 do
+            local a = k * math.pi * 2 / 3
+            ocyl(l, V(math.cos(a) * 1.6, math.sin(a) * 1.6, 6), V(math.cos(a) * 2.2, math.sin(a) * 2.2, 10), 0.35, 6)
+        end
+    end }
+
+item{ id = "trip", cat = 1, name = "Tripwire", desc = "LMB nade, LMB wire end", kind = "tripwire",
+    model = "models/weapons/w_grenade.mdl", place = "surface", logic = "trip" }
+
+item{ id = "clay", cat = 1, name = "Claymore", desc = "Directional mine", kind = "mesh", mat = "plain", color = C_OLIVE,
+    place = "upright", faceAway = true, logic = "clay",
+    col = function(l) box(l, V(-2, -6, 2), V(2, 6, 11)) end,
+    vis = function(l)
+        ybox(l, V(0, 0, 7), 0, 1.4, 3, 4) ybox(l, V(-0.6, 4.6, 7), -25, 1.4, 2, 4) ybox(l, V(-0.6, -4.6, 7), 25, 1.4, 2, 4)
+        obox(l, V(-1, 3.5, 2), V(1, 0, 0), V(0, 1, 0), V(0, 0, 1), 0.4, 0.4, 2.5)
+        obox(l, V(-1, -3.5, 2), V(1, 0, 0), V(0, 1, 0), V(0, 0, 1), 0.4, 0.4, 2.5)
+    end }
+
+item{ id = "c4", cat = 1, name = "C4", desc = "Remote, X = boom", kind = "mesh", mat = "plain", color = C_TAN,
+    place = "surface", logic = "c4",
+    col = function(l) box(l, V(-6, -3.5, 0), V(6, 3.5, 3)) end,
+    vis = function(l) box(l, V(-6, -3.5, 0), V(6, 3.5, 2.6)) box(l, V(-2, -2, 2.6), V(2.5, 2, 3.6)) end }
+
+item{ id = "laser", cat = 1, name = "Laser Mine", desc = "Wall, red beam trigger", kind = "mesh", mat = "metal", color = Color(70, 75, 70),
+    place = "surface", logic = "laser",
+    col = function(l) box(l, V(-5, -3.5, 0), V(5, 3.5, 5)) end,
+    vis = function(l)
+        box(l, V(-5, -3.5, 0), V(5, 3.5, 4.5))
+        ocyl(l, V(0, 0, 4.5), V(0, 0, 6), 1.6, 12)                         -- emitter
+        ocyl(l, V(0, 0, 6), V(0, 0, 6.4), 1.0, 12)
+        box(l, V(-4.5, -3, 4.5), V(-2.5, -1, 5.2))                         -- arm light
+        box(l, V(-6, -1, 0), V(-5, 1, 1)) box(l, V(5, -1, 0), V(6, 1, 1)) -- screw tabs
+    end }
+
+item{ id = "ied", cat = 1, name = "IED", desc = "Buried, all targets, huge", kind = "mesh", mat = "dirt", color = Color(105, 88, 62),
+    place = "surface", logic = "ied",
+    col = function(l) box(l, V(-14, -14, 0), V(14, 14, 5)) end,
+    vis = function(l)
+        frustum(l, 0, 0, 0, 16, 14, 9, 8, 4)                               -- dirt mound
+        box(l, V(-6, -5, 3.6), V(6, 5, 4.6))                               -- pressure plate
+        ocyl(l, V(6, 3, 4), V(14, 9, 0.5), 0.35, 6)                        -- wires
+        ocyl(l, V(6, -2, 4), V(15, -8, 0.5), 0.35, 6)
+        cyl(l, V(-9, 7, 2), 2.2, 3, 10)                                    -- shell nose sticking out
+    end }
+
+item{ id = "timed", cat = 1, name = "Timed Charge", desc = TIMED_FUSE .. " s, RMB = defuse", kind = "mesh", mat = "plain", color = Color(120, 45, 40),
+    place = "surface", logic = "timed",
+    col = function(l) box(l, V(-7, -4.5, 0), V(7, 4.5, 4)) end,
+    vis = function(l)
+        for k = -1, 1 do ocyl(l, V(-7, k * 3, 2), V(7, k * 3, 2), 1.5, 10) end   -- 3 sticks
+        box(l, V(-2, -4.6, 0.5), V(2, 4.6, 3.5))                            -- tape
+        box(l, V(-3.5, -2.5, 3.5), V(3.5, 2.5, 5))                          -- timer box
+        ocyl(l, V(3.5, 1.5, 4.2), V(8, 4, 1), 0.3, 6) ocyl(l, V(3.5, -1.5, 4.2), V(8, -4, 1), 0.3, 6)
+    end }
+
+-- ---------------- GEAR ----------------
+item{ id = "radar", cat = 2, name = "Recon Radar", desc = "Enemies on your HUD", kind = "mesh", mat = "metal", color = Color(100, 110, 95),
+    place = "upright", faceAway = true, logic = "radar", grid = true,
+    col = function(l) box(l, V(-12, -12, 0), V(12, 12, 60)) end,
+    vis = function(l)
+        for k = 0, 2 do
+            local a = k * math.pi * 2 / 3
+            ocyl(l, V(0, 0, 36), V(math.cos(a) * 18, math.sin(a) * 18, 0), 0.9, 8)
+        end
+        cyl(l, V(0, 0, 34), 3, 6, 10)
+        box(l, V(-6, -5, 40), V(6, 5, 48))                                 -- electronics box
+        ocyl(l, V(0, 0, 48), V(0, 0, 52), 1.2, 8)
+        local dn = V(1, 0, 0.5):getNormalized()
+        ocyl(l, V(0, 0, 53), V(0, 0, 53) + dn * 1.5, 13, 18)              -- dish
+        ocyl(l, V(0, 0, 53) + dn * 1.5, V(0, 0, 53) + dn * 2.5, 9, 18)
+        ocyl(l, V(0, 0, 53) + dn * 2.5, V(0, 0, 53) + dn * 12, 0.5, 6)   -- feed horn
+        ocyl(l, V(0, 0, 53) + dn * 12, V(0, 0, 53) + dn * 14, 1.4, 8)
+    end }
+item{ id = "alarm", cat = 2, name = "Motion Alarm", desc = "Siren + HUD alert", kind = "mesh", mat = "plain", color = Color(70, 75, 65),
+    place = "surface", logic = "alarm",
+    col = function(l) box(l, V(-4, -4, 0), V(4, 4, 7)) end,
+    vis = function(l)
+        box(l, V(-4, -4, 0), V(4, 4, 6))
+        ocyl(l, V(4, 0, 3), V(5.2, 0, 3), 1.8, 12)                         -- lens
+        ocyl(l, V(5.2, 0, 3), V(5.6, 0, 3), 1.2, 12)
+        cyl(l, V(-2, 2, 6), 1.2, 1.5, 8)                                   -- siren
+        ocyl(l, V(-2, -2.5, 6), V(-2, -2.5, 16), 0.25, 6)                  -- antenna
+    end }
+item{ id = "light", cat = 2, name = "Field Light", desc = "Lamp, lights the area", kind = "mesh", mat = "metal", color = Color(120, 118, 100),
+    place = "upright", faceAway = true, logic = "light", grid = true,
+    col = function(l) box(l, V(-10, -10, 0), V(10, 10, 104)) end,
+    vis = function(l)
+        for k = 0, 2 do
+            local a = k * math.pi * 2 / 3 + 0.5
+            ocyl(l, V(0, 0, 30), V(math.cos(a) * 20, math.sin(a) * 20, 0), 0.9, 8)
+        end
+        cyl(l, V(0, 0, 0), 1.4, 96, 8)                                     -- pole
+        box(l, V(-6, -9, 96), V(6, 9, 102))                                -- lamp head
+        box(l, V(-5, -8, 94.5), V(5, 8, 96))                               -- glass
+        box(l, V(-1, -10, 98), V(1, 10, 100))                              -- bracket
+        box(l, V(-3, -3, 20), V(3, 3, 28))                                 -- battery box
+    end }
+
+item{ id = "cam", cat = 2, name = "Periscope Cam", desc = "B = look through cams", kind = "mesh", mat = "metal", color = Color(80, 85, 78),
+    place = "upright", faceAway = true, logic = "cam", grid = true,
+    col = function(l) box(l, V(-10, -10, 0), V(10, 10, 50)) end,
+    vis = function(l)
+        for k = 0, 2 do
+            local a = k * math.pi * 2 / 3 + 1
+            ocyl(l, V(0, 0, 38), V(math.cos(a) * 16, math.sin(a) * 16, 0), 0.8, 8)
+        end
+        cyl(l, V(0, 0, 36), 2.5, 5, 10)
+        box(l, V(-7, -4.5, 41), V(7, 4.5, 50))                             -- camera body
+        ocyl(l, V(7, 0, 45.5), V(11, 0, 45.5), 3, 14)                      -- lens
+        ocyl(l, V(11, 0, 45.5), V(11.6, 0, 45.5), 2.2, 14)
+        box(l, V(-4, -1, 50), V(-2, 1, 58))                                -- antenna
+    end }
+
+item{ id = "flag", cat = 2, name = "Rally Flag", desc = "Waypoint on your HUD", kind = "mesh", mat = "plain", color = Color(170, 45, 40),
+    place = "upright", faceAway = true, logic = "flag",
+    col = function(l) box(l, V(-3, -3, 0), V(3, 3, 112)) end,
+    vis = function(l)
+        cyl(l, V(0, 0, 0), 1.1, 112, 8)
+        cyl(l, V(0, 0, 112), 2, 2, 8)
+        local q = {}
+        local N = 10
+        for i = 0, N - 1 do                                                -- waving cloth
+            local x0, x1 = 1 + i * 4, 1 + (i + 1) * 4
+            local y0, y1 = math.sin(i * 0.8) * 3 * i / N, math.sin((i + 1) * 0.8) * 3 * (i + 1) / N
+            q[#q + 1] = { V(x0, y0, 84), V(x1, y1, 84), V(x1, y1, 108), V(x0, y0, 108) }
+        end
+        l[#l + 1] = { t = "quads", q = q }
+        box(l, V(-8, -8, 0), V(8, 8, 3))
+    end }
+
+item{ id = "decoy", cat = 2, name = "Sound Decoy", desc = "Fake gunfire bursts", kind = "mesh", mat = "plain", color = Color(75, 80, 62),
+    place = "upright", faceAway = true, logic = "decoy",
+    col = function(l) box(l, V(-7, -6, 0), V(7, 6, 14)) end,
+    vis = function(l)
+        box(l, V(-7, -6, 0), V(6, 6, 13))
+        ocyl(l, V(6, 0, 6.5), V(9, 0, 6.5), 5, 16)                         -- speaker cone
+        ocyl(l, V(9, 0, 6.5), V(9.4, 0, 6.5), 2, 12)
+        box(l, V(-6, -1, 13), V(-4, 1, 14)) ocyl(l, V(-5, 0, 14), V(-5, 0, 34), 0.3, 6)
+    end }
+
+-- ---------------- manned guns: base (custom prop) + gun part (hologram) ----------------
+-- geo: pivot = gun hologram position on the base, muzzle / eye in gun space, seat in base space
+-- trench mount: the gun stands on a post next to a trench wall, barrel just over the parapet bags,
+-- the gunner sits inside the trench on 2 ammo boxes
+local GUN_GEO = {
+    mg     = { pivot = V(0, 0, 30), muzzle = V(49, 0, 0.5), eye = V(-26, 0, 9),  seat = V(-40, 0, 14) },
+    sniper = { pivot = V(0, 0, 30), muzzle = V(50, 0, 0),   eye = V(-22, 0, 10), seat = V(-44, 0, 14) },
+    atgun  = { pivot = V(0, 0, 30), muzzle = V(84, 0, 0),   eye = V(-36, 0, 13), seat = V(-62, 0, 14) },
+    mortar = { pivot = V(0, 0, 8),  muzzle = V(47, 0, 0),   eye = V(-40, 0, 40), seat = V(-40, 0, 14) },
+    flak   = { pivot = V(0, 0, 36), muzzle = V(62, 5, 1),   muzzle2 = V(62, -5, 1), eye = V(-28, 0, 12), seat = V(-46, 0, 14) },
+}
+-- gun mounts: the gun stands on a post of one of these pivot heights (behind a wall / in a trench / on a deck)
+local MOUNT_LEVELS = { 42, 54, 64, TRENCH_DEPTH + 14, 140 }
+local MOUNT_TRENCH = 4
+local MOUNT_FRONT = 8
+local function mountLevelFor(P)
+    if P <= 36 then return 0 end
+    for k, h in ipairs(MOUNT_LEVELS) do if h >= P - 2 then return k end end
+    return #MOUNT_LEVELS
+end
+local function mountSeatZ(P) return math.max(14, P - 46) end
+local function gunPivot(gun, lvl) return (lvl and lvl > 0) and V(0, 0, MOUNT_LEVELS[lvl]) or GUN_GEO[gun].pivot end
+local function gunSeatPos(gun, lvl)
+    local s = GUN_GEO[gun].seat
+    if not s then return nil end
+    return (lvl and lvl > 0) and V(s.x, 0, mountSeatZ(MOUNT_LEVELS[lvl])) or s
+end
+do
+local function ammoStool(l, x, z0)
+    z0 = z0 or 0
+    box(l, V(x - 8, -9, z0), V(x + 8, 9, z0 + 13))
+    box(l, V(x - 8.5, -9.5, z0 + 13), V(x + 8.5, 9.5, z0 + 14))
+    box(l, V(x - 2, -10, z0 + 6), V(x + 2, -9, z0 + 9)) box(l, V(x - 2, 9, z0 + 6), V(x + 2, 10, z0 + 9))
+end
+-- post of height P (pivot) + a stack of ammo boxes as the gunner seat
+local function mountPost(l, seatX, P)
+    local sz = mountSeatZ(P)
+    box(l, V(-4, -4, 0), V(4, 4, P - 11))                      -- post
+    box(l, V(-10, -10, 0), V(10, 10, 3))                       -- foot plate
+    local bz = math.min(30, P - 14)
+    beam(l, V(0, 0, bz), V(9, 0, 3), 1, 1) beam(l, V(0, 0, bz), V(-9, 0, 3), 1, 1)
+    beam(l, V(0, 0, bz), V(0, 9, 3), 1, 1) beam(l, V(0, 0, bz), V(0, -9, 3), 1, 1)
+    cyl(l, V(0, 0, P - 9), 3, 5, 12)                           -- swivel
+    cyl(l, V(0, 0, P - 11), 4.5, 2, 12)
+    local z, k = 0, 0
+    while z < sz - 14 - 0.5 do                                 -- crate stack under the seat
+        local z1 = math.min(z + 20, sz - 14)
+        local o = (k % 2 == 0) and 0 or 1
+        box(l, V(seatX - 10 + o, -11 + o, z), V(seatX + 10 - o, 11 - o, z1 - 0.4))
+        box(l, V(seatX - 10.5 + o, -4, z + 2), V(seatX + 10.5 - o, 4, z1 - 2))
+        z, k = z1, k + 1
+    end
+    ammoStool(l, seatX, sz - 14)
+end
+local function mountCol(seatX, P)
+    return function(l)
+        box(l, V(-6, -6, 0), V(6, 6, P - 6))
+        box(l, V(seatX - 10, -11, 0), V(seatX + 10, 11, mountSeatZ(P)))
+    end
+end
+local function mountable(it, seatX)
+    it.mountVis, it.mountCol = {}, {}
+    for k, P in ipairs(MOUNT_LEVELS) do
+        it.mountVis[k] = function(l) mountPost(l, seatX, P) end
+        it.mountCol[k] = mountCol(seatX, P)
+    end
+    return it
+end
+local function mgPart(l)
+    box(l, V(-16, -3, -3), V(6, 3, 4))                         -- receiver
+    box(l, V(-12, -3.2, 4), V(2, 3.2, 5.4))                    -- feed cover
+    ocyl(l, V(6, 0, 0.5), V(28, 0, 0.5), 2.4, 12)              -- barrel jacket
+    ocyl(l, V(28, 0, 0.5), V(46, 0, 0.5), 1.1, 10)             -- barrel
+    ocyl(l, V(45, 0, 0.5), V(49, 0, 0.5), 1.7, 10)             -- muzzle
+    box(l, V(40, -0.4, 1.6), V(41.5, 0.4, 5))                  -- front sight
+    box(l, V(-7, -1.2, 5.4), V(-5.5, 1.2, 7))                  -- rear sight
+    box(l, V(-17.5, -3, -3), V(-16, 3, 3))                     -- back plate
+    ocyl(l, V(-19, -2.5, -3), V(-19, -2.5, 3), 0.8, 8)         -- spade grips
+    ocyl(l, V(-19, 2.5, -3), V(-19, 2.5, 3), 0.8, 8)
+    box(l, V(-19, -2.5, -0.6), V(-17.5, 2.5, 0.6))
+    box(l, V(-8, 3, -9), V(4, 9, 2))                           -- ammo box
+    box(l, V(-6, 3, 1), V(2, 3.6, 3.5))                        -- belt
+    box(l, V(-3, -1.5, -6), V(3, 1.5, -3))                     -- mount
+end
+local function mgBase(l)
+    cyl(l, V(0, 0, 23), 3, 5, 12)                              -- hub
+    cyl(l, V(0, 0, 21), 4.5, 2, 12)
+    ocyl(l, V(0, 0, 22), V(28, 0, 0), 1.2, 8)                  -- tripod legs
+    ocyl(l, V(0, 0, 22), V(-18, 17, 0), 1.2, 8)
+    ocyl(l, V(0, 0, 22), V(-18, -17, 0), 1.2, 8)
+    ammoStool(l, -40)
+end
+local function sniperPart(l)
+    box(l, V(-34, -1.6, -4), V(-14, 1.6, 1.5))                 -- stock
+    box(l, V(-30, -1.4, 1.5), V(-18, 1.4, 3))                  -- cheek rest
+    box(l, V(-14, -1.8, -2), V(6, 1.8, 2))                     -- receiver
+    box(l, V(-6, -1.2, -6), V(-1, 1.2, -2))                    -- magazine
+    box(l, V(-12, -0.4, -4.5), V(-8, 0.4, -2))                 -- trigger guard
+    ocyl(l, V(6, 0, 0), V(44, 0, 0), 0.9, 10)                  -- barrel
+    box(l, V(44, -1.3, -1), V(50, 1.3, 1))                     -- muzzle brake
+    ocyl(l, V(-10, 0, 4), V(10, 0, 4), 1.3, 12)                -- scope
+    ocyl(l, V(10, 0, 4), V(14, 0, 4), 2, 12)
+    ocyl(l, V(-13, 0, 4), V(-10, 0, 4), 1.8, 12)
+    box(l, V(-6, -0.8, 1.6), V(-4, 0.8, 2.9)) box(l, V(4, -0.8, 1.6), V(6, 0.8, 2.9))
+    box(l, V(-1, 1.8, 0.5), V(1, 3.5, 1.5))                    -- bolt handle
+end
+local function sniperBase(l)
+    bag(l, V(14, -7, 0), 0, 26, 15, 10) bag(l, V(14, 7, 0), 0, 26, 15, 10)
+    bag(l, V(14, 0, 9), 0, 26, 15, 10)
+    ocyl(l, V(20, 0, 26), V(24, 6, 18.5), 0.7, 8)              -- bipod resting on the bags
+    ocyl(l, V(20, 0, 26), V(24, -6, 18.5), 0.7, 8)
+    cyl(l, V(0, 0, 22), 2.5, 7, 10)                            -- swivel post
+    box(l, V(-3, -6, 18), V(3, 6, 22))
+    ammoStool(l, -44)
+end
+item{ id = "mg", cat = 3, name = "Machine Gun", desc = "Manned, E to use", kind = "gun", gun = "mg",
+    mat = "metal", color = C_GUN, place = "upright", faceAway = true,
+    col = function(l) box(l, V(-16, -16, 0), V(16, 16, 22)) box(l, V(-48, -9, 0), V(-32, 9, 14)) end,
+    vis = mgBase, part = mgPart }
+mountable(ITEMS[#ITEMS], -40)
+item{ id = "sniper", cat = 3, name = "Sniper Rifle", desc = "Manned, scope, E", kind = "gun", gun = "sniper",
+    mat = "metal", color = Color(90, 85, 70), place = "upright", faceAway = true,
+    col = function(l) box(l, V(-4, -15, 0), V(28, 15, 20)) box(l, V(-52, -9, 0), V(-36, 9, 14)) end,
+    vis = sniperBase, part = sniperPart }
+mountable(ITEMS[#ITEMS], -44)
+
+-- anti-tank gun (shield + wheels)
+local function atPart(l)
+    box(l, V(8, -26, -16), V(10, 26, 9))                       -- shield
+    box(l, V(8, -26, 9), V(10, -5, 18)) box(l, V(8, 5, 9), V(10, 26, 18))
+    box(l, V(10, -27, -16), V(13, -25, 18)) box(l, V(10, 25, -16), V(13, 27, 18))
+    ocyl(l, V(0, 0, 0), V(78, 0, 0), 2.2, 12)                  -- barrel
+    ocyl(l, V(76, 0, 0), V(84, 0, 0), 3.4, 10)                 -- muzzle brake
+    ocyl(l, V(-6, 0, -4.5), V(40, 0, -4.5), 2.6, 10)           -- recuperator
+    box(l, V(-22, -5, -5), V(0, 5, 5))                         -- breech
+    box(l, V(-28, -1, -2), V(-22, 1, 2))
+    box(l, V(-8, 6, 3), V(2, 8, 7))                            -- sight
+    ocyl(l, V(-2, 8, 5), V(-10, 8, 5), 1, 8)
+end
+local function atBase(l)
+    ocyl(l, V(0, -30, 14), V(0, 30, 14), 1.8, 8)               -- axle
+    ocyl(l, V(0, -31, 14), V(0, -25, 14), 14, 16)              -- wheels
+    ocyl(l, V(0, 25, 14), V(0, 31, 14), 14, 16)
+    ocyl(l, V(0, -32, 14), V(0, -31, 14), 4, 10) ocyl(l, V(0, 31, 14), V(0, 32, 14), 4, 10)
+    beam(l, V(0, -8, 14), V(-74, -28, 1), 2, 2.5)              -- split trails
+    beam(l, V(0, 8, 14), V(-74, 28, 1), 2, 2.5)
+    box(l, V(-78, -32, 0), V(-70, -24, 3)) box(l, V(-78, 24, 0), V(-70, 32, 3))
+    cyl(l, V(0, 0, 14), 5, 10, 12)                             -- mount
+    box(l, V(-6, -6, 24), V(6, 6, 26))
+    ammoStool(l, -62)
+end
+item{ id = "atgun", cat = 3, name = "AT Gun", desc = "Manned, 1 shell + blast", kind = "gun", gun = "atgun",
+    mat = "metal", color = Color(80, 88, 70), place = "upright", faceAway = true, grid = true,
+    col = function(l) box(l, V(-20, -32, 0), V(14, 32, 28)) box(l, V(-70, -9, 0), V(-54, 9, 14)) end,
+    vis = atBase, part = atPart }
+mountable(ITEMS[#ITEMS], -62)
+
+-- mortar (indirect fire)
+local function mortarPart(l)
+    ocyl(l, V(-4, 0, 0), V(44, 0, 0), 3.2, 14)                 -- tube
+    ocyl(l, V(44, 0, 0), V(47, 0, 0), 3.8, 14)
+    ocyl(l, V(-7, 0, 0), V(-4, 0, 0), 3.7, 12)                 -- breech cap
+    ocyl(l, V(24, 0, 0), V(27, 0, 0), 4, 12)                   -- bipod collar
+end
+local function mortarBase(l)
+    cyl(l, V(0, 0, 0), 15, 3, 18)                              -- baseplate
+    cyl(l, V(0, 0, 3), 4.5, 5, 12)                             -- socket
+    ocyl(l, V(15, 0, 28), V(22, 11, 0), 0.9, 8)                -- bipod
+    ocyl(l, V(15, 0, 28), V(22, -11, 0), 0.9, 8)
+    ocyl(l, V(15, 0, 28), V(19, 0, 2), 1.2, 8)                 -- elevating screw
+    box(l, V(-30, 14, 0), V(-12, 30, 9))                       -- shell crate
+    for k = 0, 3 do ocyl(l, V(-27 + k * 4.5, 22, 9), V(-27 + k * 4.5, 22, 20), 1.6, 8) end
+    ammoStool(l, -40)
+end
+item{ id = "mortar", cat = 3, name = "Mortar", desc = "Drone cam, wheel = angle", kind = "gun", gun = "mortar",
+    mat = "metal", color = Color(78, 84, 70), place = "upright", faceAway = true, grid = true,
+    col = function(l) cyl(l, V(0, 0, 0), 15, 8, 10) box(l, V(-48, -9, 0), V(-32, 9, 14)) end,
+    vis = mortarBase, part = mortarPart }
+
+-- twin anti-air gun
+local function flakPart(l)
+    box(l, V(-14, -9, -5), V(10, 9, 5))                        -- receiver
+    for sy = -1, 1, 2 do
+        ocyl(l, V(10, sy * 5, 1), V(56, sy * 5, 1), 1.3, 10)   -- barrels
+        ocyl(l, V(10, sy * 5, 1), V(24, sy * 5, 1), 2.4, 10)   -- jackets
+        ocyl(l, V(55, sy * 5, 1), V(62, sy * 5, 1), 2, 10)     -- flash hiders
+        box(l, V(-10, sy * 9, -6), V(4, sy * 15, 6))           -- ammo boxes
+    end
+    box(l, V(4, -22, -12), V(6, -3, 6)) box(l, V(4, 3, -12), V(6, 22, 6))   -- shield
+    for k = 0, 7 do                                            -- ring sight
+        local a1, a2 = k * math.pi / 4, (k + 1) * math.pi / 4
+        beam(l, V(20, math.cos(a1) * 6, 13 + math.sin(a1) * 6), V(20, math.cos(a2) * 6, 13 + math.sin(a2) * 6), 0.3, 0.3)
+    end
+    box(l, V(19.5, -0.3, 5), V(20.5, 0.3, 7))
+    box(l, V(-22, -8, -2), V(-14, -6, 0)) box(l, V(-22, 6, -2), V(-14, 8, 0))   -- handles
+end
+local function flakBase(l)
+    cyl(l, V(0, 0, 0), 18, 4, 18)                              -- pedestal
+    cyl(l, V(0, 0, 4), 5, 24, 12)
+    cyl(l, V(0, 0, 28), 9, 3, 14)
+    box(l, V(-5, -10, 31), V(5, 10, 33))
+    ammoStool(l, -46)
+end
+item{ id = "flak", cat = 3, name = "Flak 2x", desc = "Manned AA, blast hits", kind = "gun", gun = "flak",
+    mat = "metal", color = Color(90, 92, 84), place = "upright", faceAway = true, grid = true,
+    col = function(l) cyl(l, V(0, 0, 0), 18, 32, 10) box(l, V(-54, -9, 0), V(-38, 9, 14)) end,
+    vis = flakBase, part = flakPart }
+mountable(ITEMS[#ITEMS], -46)
+
+end
+-- ---------------- PROPS ----------------
+local function hedgehog(l, beamHalf, thick)
+    local up = V(0, 0, 1)
+    local s3, s23 = 1 / math.sqrt(3), math.sqrt(2 / 3)
+    local zc = beamHalf * s3 + 1
+    for k = 0, 2 do
+        local a = math.rad(k * 120)
+        local e = up * s3 + V(math.cos(a), math.sin(a), 0) * s23
+        local p1 = e:cross(up):getNormalized()
+        local p2 = e:cross(p1):getNormalized()
+        obox(l, V(0, 0, zc), e, p1, p2, beamHalf, thick, thick)
+    end
+end
+item{ id = "hog", cat = 6, name = "Czech Hedgehog", desc = "Anti-tank obstacle", kind = "mesh", mat = "metal", color = C_STEEL,
+    place = "upright",
+    col = function(l) hedgehog(l, 56, 4) end,
+    vis = function(l) hedgehog(l, 56, 4) end }
+
+item{ id = "teeth", cat = 6, name = "Dragon's Teeth", desc = "Concrete AT pyramid", kind = "mesh", mat = "concrete", color = C_CONC,
+    place = "upright", grid = true,
+    col = function(l) frustum(l, 0, 0, 0, 20, 20, 6, 6, 42) end }
+
+local TRENCH_VAR = {}        -- TRENCH_VAR[shape][cover] = item
+do
+-- ---------------- trench pieces ----------------
+-- One cell = TRENCH_CELL. Channel along X (width TRENCH_WIDTH). Each closed side has a wall:
+--   inner vertical face (wood posts) -> flat parapet with sandbags (TRENCH_DEPTH high)
+--   -> outer earth slope down to the ground, TRENCH_SPILL beyond the cell (walkable)
+-- camo net: sagging rope grid + leaf patches (visual only, bullets and players pass through)
+local function camoNet(l, x0, x1, y0, y1, z, sag)
+    local q = {}
+    local nx, ny = 16, 8
+    local function P(u, v) return V(x0 + (x1 - x0) * u, y0 + (y1 - y0) * v, z - sag * (1 - (2 * u - 1) ^ 2) * (1 - (2 * v - 1) ^ 2)) end
+    local t = 0.5
+    for j = 0, ny do
+        for i = 0, nx - 1 do
+            local a, b = P(i / nx, j / ny), P((i + 1) / nx, j / ny)
+            q[#q + 1] = { a - V(0, t, 0), b - V(0, t, 0), b + V(0, t, 0), a + V(0, t, 0) }
+        end
+    end
+    for i = 0, nx do
+        for j = 0, ny - 1 do
+            local a, b = P(i / nx, j / ny), P(i / nx, (j + 1) / ny)
+            q[#q + 1] = { a - V(t, 0, 0), b - V(t, 0, 0), b + V(t, 0, 0), a + V(t, 0, 0) }
+        end
+    end
+    local seed = 12345
+    local function rnd() seed = (seed * 16807) % 2147483647 return seed / 2147483647 end
+    for _ = 1, 90 do                                                   -- leaf patches
+        local c = P(rnd(), rnd()) - V(0, 0, 0.4)
+        local sz, a = 4 + rnd() * 6, rnd() * math.pi
+        local d1 = V(math.cos(a), math.sin(a), 0) * sz
+        local d2 = V(-math.sin(a), math.cos(a), 0) * (sz * 0.6)
+        q[#q + 1] = { c - d1 - d2, c + d1 - d2 + V(0, 0, rnd() * 2 - 1), c + d1 + d2, c - d1 + d2 + V(0, 0, rnd() * 2 - 1) }
+    end
+    l[#l + 1] = { t = "quads", q = q }
+end
+
+-- cover: "open" | "net" (camo net on poles) | "roof" (plank roof, firing slit under it) | "closed" (roof, no slits)
+local function trenchShape(kind, vis, cover)
+    local l_
+    local h   = TRENCH_CELL / 2
+    local ch  = TRENCH_WIDTH / 2        -- channel half width
+    local tw  = 12                      -- parapet top width
+    local H   = TRENCH_DEPTH
+    local out = h + TRENCH_SPILL        -- slope foot
+    local Z0  = -8                      -- dig a bit into the ground
+    local c   = ch + tw
+    local RZ  = H + ROOF_Z
+    local closed = cover == "closed"
+    local WT  = closed and RZ or H      -- closed: the walls go up to the roof (no slit)
+    local function M(axis, u, v, z) if axis == "x" then return V(u, v, z) else return V(v, u, z) end end
+    local function hx(axis, a0, a1, b0, b1, z0, z1)
+        hex(l_, { M(axis, a0, b0, z0), M(axis, a1, b0, z0), M(axis, a1, b1, z0), M(axis, a0, b1, z0),
+                  M(axis, a0, b0, z1), M(axis, a1, b0, z1), M(axis, a1, b1, z1), M(axis, a0, b1, z1) })
+    end
+    local function wall(axis, a0, a1, s)
+        local b0, b1 = math.min(s * ch, s * c), math.max(s * ch, s * c)
+        hx(axis, a0, a1, b0, b1, Z0, WT)                                    -- core
+        local i, o = s * c, s * out                                          -- outer slope
+        hex(l_, { M(axis, a0, i, Z0), M(axis, a1, i, Z0), M(axis, a1, o, Z0), M(axis, a0, o, Z0),
+                  M(axis, a0, i, H),  M(axis, a1, i, H),  M(axis, a1, o, 0),  M(axis, a0, o, 0) })
+        if vis then
+            for row = 0, closed and 3 or 0 do                              -- round sandbags on the parapet
+                local u = a0 + 11 + ((row % 2 == 1) and 11 or 0)
+                while u + 11 <= a1 + 0.1 do
+                    bag(l_, M(axis, u, s * (ch + tw / 2), H - 1 + row * 7), axis == "x" and 0 or 90, 22, 12, 8)
+                    u = u + 22
+                end
+            end
+            local u = a0 + 12
+            while u <= a1 - 8 do                                            -- wooden posts on the inner face
+                local p0, p1 = math.min(s * ch, s * (ch - 2)), math.max(s * ch, s * (ch - 2))
+                hx(axis, u - 2, u + 2, p0, p1, 0, WT)
+                u = u + 46
+            end
+        end
+    end
+    local function pillar(x0, x1, y0, y1) box(l_, V(x0, y0, Z0), V(x1, y1, WT)) end
+    local function filler(sx, sy)
+        hex(l_, { V(sx * out, sy * out, Z0), V(sx * c, sy * out, Z0), V(sx * c, sy * c, Z0), V(sx * out, sy * c, Z0),
+                  V(sx * out, sy * out, 0),  V(sx * c, sy * out, 0),  V(sx * c, sy * c, H),  V(sx * out, sy * c, 0) })
+    end
+    local walls = {}
+    return function(l)
+        l_ = l
+        if kind == "straight" or kind == "exit" then
+            wall("x", -h, h, 1) wall("x", -h, h, -1) walls = { py = true, ny = true }
+            if kind == "straight" and TRENCH_FIRE_STEP then
+                box(l, V(-h, -ch, Z0), V(h, -ch + 22, 18))
+            end
+            if kind == "exit" then
+                hex(l, { V(-h, 4, Z0), V(h, 4, Z0), V(h, ch, Z0), V(-h, ch, Z0),
+                         V(-h, 4, 0),  V(h, 4, H),  V(h, ch, H),  V(-h, ch, 0) })
+            end
+        elseif kind == "corner" then
+            wall("x", -h, h, -1) wall("y", -h, h, -1) walls = { ny = true, nx = true }
+            pillar(ch, h, ch, h)
+            filler(-1, -1)
+        elseif kind == "tee" then
+            wall("x", -h, h, -1) walls = { ny = true }
+            pillar(-h, -ch, ch, h) pillar(ch, h, ch, h)
+        elseif kind == "cross" then
+            pillar(-h, -ch, -h, -ch) pillar(ch, h, -h, -ch) pillar(-h, -ch, ch, h) pillar(ch, h, ch, h)
+        elseif kind == "end" then
+            wall("x", -h, h, 1) wall("x", -h, h, -1) wall("y", -h, h, -1) walls = { py = true, ny = true, nx = true }
+            filler(-1, -1) filler(-1, 1)
+        end
+        local d = ch + 6                                                    -- 4 posts stand on walls / pillars
+        if cover == "net" and vis then
+            for sx = -1, 1, 2 do for sy = -1, 1, 2 do
+                box(l, V(sx * d - 1.5, sy * d - 1.5, H), V(sx * d + 1.5, sy * d + 1.5, H + 46))
+            end end
+            camoNet(l, -h - 4, h + 4, -h - 4, h + 4, H + 46, 16)
+        elseif cover == "roof" or closed then
+            if not vis then box(l, V(-h, -h, RZ), V(h, h, RZ + 4)) return end
+            local x = -h
+            while x < h - 1 do                                              -- planks over the whole cell
+                box(l, V(x + 0.6, -h, RZ), V(math.min(x + 15, h) - 0.6, h, RZ + 3))
+                x = x + 15
+            end
+            for s = -1, 1, 2 do                                             -- beams
+                box(l, V(-h, s * d - 3, RZ - 6), V(h, s * d + 3, RZ))
+                box(l, V(s * d - 3, -h, RZ - 7), V(s * d + 3, h, RZ - 6))
+            end
+            for sx = -1, 1, 2 do for sy = -1, 1, 2 do
+                box(l, V(sx * d - 2.5, sy * d - 2.5, H), V(sx * d + 2.5, sy * d + 2.5, RZ - 6))
+            end end
+            if walls.py then bagRow(l, -h, h, c - 4, RZ + 3, 1) end          -- bags on the roof over the walls
+            if walls.ny then bagRow(l, -h, h, -c + 4, RZ + 3, 1) end
+            if walls.nx then bagRowY(l, -h + 22, h - 22, -c + 4, RZ + 3, 1) end
+        end
+    end
+end
+
+-- 2x2 trench shelter: sits on the trench grid (4 cells), doors line up with trench channels
+-- doors = list of sides with a door ("nx" / "px"), the door is in the cell row y = -CELL/2
+local SHELTER_IN = TRENCH_CELL - 36
+local function shelterShape(doors, vis, cover)
+    return function(l)
+        local B, H, tw, Z0 = TRENCH_CELL, TRENCH_DEPTH, 12, -8
+        local S, ch = SHELTER_IN, TRENCH_WIDTH / 2
+        local c = S + tw
+        local out = B + TRENCH_SPILL
+        local RZ = H + ROOF_Z
+        local closed = cover == "closed"
+        local WT = closed and RZ or H
+        local DY = -B / 2
+        local door = {}
+        for _, k in ipairs(doors) do door[k] = true end
+        local function M(axis, u, v, z) if axis == "x" then return V(u, v, z) else return V(v, u, z) end end
+        local function seg(axis, s, u0, u1, f0, f1)                       -- wall core + outer slope piece
+            local b0, b1 = math.min(s * S, s * c), math.max(s * S, s * c)
+            hex(l, { M(axis, u0, b0, Z0), M(axis, u1, b0, Z0), M(axis, u1, b1, Z0), M(axis, u0, b1, Z0),
+                     M(axis, u0, b0, WT), M(axis, u1, b0, WT), M(axis, u1, b1, WT), M(axis, u0, b1, WT) })
+            local i, o = s * c, s * out
+            hex(l, { M(axis, f0, i, Z0), M(axis, f1, i, Z0), M(axis, f1, o, Z0), M(axis, f0, o, Z0),
+                     M(axis, u0, i, H),  M(axis, u1, i, H),  M(axis, f1, o, 0),  M(axis, f0, o, 0) })
+            if vis then
+                for row = 0, closed and 3 or 0 do
+                    local u = u0 + 11 + ((row % 2 == 1) and 11 or 0)
+                    while u + 11 <= u1 + 0.1 do
+                        bag(l, M(axis, u, s * (S + tw / 2), H - 1 + row * 7), axis == "x" and 0 or 90, 22, 12, 8)
+                        u = u + 22
+                    end
+                end
+                local u = u0 + 14
+                while u <= u1 - 10 do
+                    local p0, p1 = math.min(s * S, s * (S - 2)), math.max(s * S, s * (S - 2))
+                    hex(l, { M(axis, u - 2, p0, 0), M(axis, u + 2, p0, 0), M(axis, u + 2, p1, 0), M(axis, u - 2, p1, 0),
+                             M(axis, u - 2, p0, WT), M(axis, u + 2, p0, WT), M(axis, u + 2, p1, WT), M(axis, u - 2, p1, WT) })
+                    u = u + 45
+                end
+            end
+        end
+        local function side(axis, s, hasDoor)
+            if not hasDoor then seg(axis, s, -c, c, -out, out) return end
+            seg(axis, s, -c, DY - ch, -out, DY - ch)
+            seg(axis, s, DY + ch, c, DY + ch, out)
+        end
+        side("x", 1, false) side("x", -1, false)                          -- +Y / -Y walls
+        side("y", 1, door.px) side("y", -1, door.nx)                      -- +X / -X walls (doors)
+        if door.px then box(l, V(-S, S - 22, Z0), V(S, S, 18))            -- fire step
+        else box(l, V(S - 22, -S, Z0), V(S, S, 18)) end
+        if cover == "net" and vis then
+            local d = S + 6
+            for sx = -1, 1, 2 do for sy = -1, 1, 2 do
+                box(l, V(sx * d - 1.5, sy * d - 1.5, H), V(sx * d + 1.5, sy * d + 1.5, H + 50))
+            end end
+            box(l, V(-1.5, -1.5, 0), V(1.5, 1.5, H + 44))
+            camoNet(l, -B - 4, B + 4, -B - 4, B + 4, H + 50, 10)
+        elseif cover == "roof" or closed then
+            if not vis then box(l, V(-B, -B, RZ), V(B, B, RZ + 4)) return end
+            local x = -B
+            while x < B - 1 do
+                box(l, V(x + 0.6, -B, RZ), V(math.min(x + 16, B) - 0.6, B, RZ + 3))
+                x = x + 16
+            end
+            local d = S + 6
+            for _, y in ipairs({ -d, 0, d }) do box(l, V(-B, y - 3, RZ - 6), V(B, y + 3, RZ)) end
+            for sx = -1, 1, 2 do
+                box(l, V(sx * 78 - 3, -3, 0), V(sx * 78 + 3, 3, RZ - 6))   -- 2 posts in the middle
+                for sy = -1, 1, 2 do
+                    box(l, V(sx * d - 2.5, sy * d - 2.5, H), V(sx * d + 2.5, sy * d + 2.5, RZ - 6))
+                end
+            end
+            bagRow(l, -B, B, c - 4, RZ + 3, 1) bagRow(l, -B, B, -c + 4, RZ + 3, 1)
+        end
+    end
+end
+
+-- walls = closed sides (px = +X, py = +Y, nx = -X, ny = -Y) -> guns can be mounted on them
+local function W(...) local t = {} for _, k in ipairs({ ... }) do t[k] = true end return t end
+local COVERS = { { "open", "" }, { "net", "camo net" }, { "roof", "roof + slits" }, { "closed", "closed" } }
+for _, t in ipairs({ { "straight", "Trench: straight", "Fire step one side", W("py", "ny") },
+                     { "corner", "Trench: corner", "Forward + left", W("ny", "nx") },
+                     { "tee", "Trench: T", "Three ways", W("ny") }, { "cross", "Trench: cross", "Four ways", W() },
+                     { "end", "Trench: end", "Dead end", W("py", "ny", "nx") },
+                     { "exit", "Trench: exit", "Ramp up and out", W("ny"), nocover = true },
+                     { "sh1", "Shelter 2x2", "1 door into a trench", W("px", "py", "ny", "nx"), doors = { "nx" } },
+                     { "sh2", "Shelter 2x2 pass", "2 doors, trench through", W("py", "ny", "px", "nx"), doors = { "nx", "px" } } }) do
+    TRENCH_VAR[t[1]] = {}
+    for ci, cv in ipairs(COVERS) do
+        if ci == 1 or not t.nocover then
+            local big = t.doors ~= nil
+            item{ id = "tr_" .. t[1] .. (ci > 1 and ("_" .. cv[1]) or ""), cat = 4, hidden = ci > 1,
+                name = t[2] .. (ci > 1 and (", " .. cv[2]) or ""), desc = t[3], kind = "mesh", mat = "dirt", color = C_DIRT,
+                place = "trench", size = big and 2 or 1, shape = t[1], cover = cv[1],
+                col = big and shelterShape(t.doors, false, cv[1]) or trenchShape(t[1], false, cv[1]),
+                vis = big and shelterShape(t.doors, true, cv[1]) or trenchShape(t[1], true, cv[1]),
+                walls = cv[1] ~= "closed" and t[4] or nil,
+                inner = big and SHELTER_IN or TRENCH_WIDTH / 2, span = big and (SHELTER_IN - 20) or TRENCH_CELL / 2 }
+            TRENCH_VAR[t[1]][cv[1]] = ITEMS[#ITEMS]
+        end
+    end
+end
+-- cover tools: click a placed trench piece -> it is swapped for the covered version
+for ci, cv in ipairs(COVERS) do
+    item{ id = "cov_" .. cv[1], cat = 4, kind = "cover", cover = cv[1],
+        name = ({ "Cover: remove", "Cover: camo net", "Cover: roof+slits", "Cover: closed" })[ci],
+        desc = ({ "Open trench again", "Net on poles", "Planks, firing slit", "Roof, no holes" })[ci] }
+end
+
+end
+do
+-- ---------------- sandbags (round, stackable) ----------------
+-- mnt = where guns can mount on a fortification: faces { o = wall centre, d = side the gun stands on, half, span }
+local function FW(top, list, P)
+    local f = {}
+    for _, t in ipairs(list) do f[#f + 1] = { o = V(t[1], t[2], 0), d = V(t[3], t[4], 0), half = t[5], span = t[6] } end
+    return { top = top, faces = f, P = P }
+end
+local function FW2(top, ox, oy, alongX, half, span)        -- both sides of a straight wall
+    if alongX then return { ox, oy, 0, 1, half, span }, { ox, oy, 0, -1, half, span } end
+    return { ox, oy, 1, 0, half, span }, { ox, oy, -1, 0, half, span }
+end
+item{ id = "bags", cat = 5, name = "Sandbags: wall", desc = "3 rows, stackable", kind = "mesh", mat = "fabric", color = C_TAN,
+    place = "upright", grid = true, stack = stackH(3), mnt = FW(stackH(3), { FW2(0, 0, 0, true, 7, 44) }),
+    col = function(l) box(l, V(-44, -7, 0), V(44, 7, stackH(3))) end,
+    vis = function(l) bagRow(l, -44, 44, 0, 0, 3) end }
+
+item{ id = "bags_low", cat = 5, name = "Sandbags: low", desc = "1 row, stackable", kind = "mesh", mat = "fabric", color = C_TAN,
+    place = "upright", grid = true, stack = stackH(1), mnt = FW(stackH(1), { FW2(0, 0, 0, true, 7, 44) }),
+    col = function(l) box(l, V(-44, -7, 0), V(44, 7, stackH(1))) end,
+    vis = function(l) bagRow(l, -44, 44, 0, 0, 1) end }
+
+local ARC_R, ARC_DEG = 128, 45
+item{ id = "bags_arc", cat = 5, name = "Sandbags: arc", desc = "45 deg, 8 = ring", kind = "mesh", mat = "fabric", color = C_TAN,
+    place = "upright", faceAway = true, stack = stackH(3),
+    mnt = (function()
+        local t = {}
+        for k = -1, 1 do
+            local r = math.rad(k * ARC_DEG / 3)
+            local cx, cy, nx, ny = -ARC_R + ARC_R * math.cos(r), ARC_R * math.sin(r), math.cos(r), math.sin(r)
+            t[#t + 1] = { cx, cy, -nx, -ny, 7, 14 } t[#t + 1] = { cx, cy, nx, ny, 7, 14 }
+        end
+        return FW(stackH(3), t)
+    end)(),
+    col = function(l)
+        local seg = ARC_DEG / 3
+        for k = -1, 1 do
+            local a = k * seg
+            local r = math.rad(a)
+            ybox(l, V(-ARC_R + ARC_R * math.cos(r), ARC_R * math.sin(r), stackH(3) / 2), a + 90,
+                 ARC_R * math.sin(math.rad(seg / 2)) + 1, 7, stackH(3) / 2)
+        end
+    end,
+    vis = function(l)
+        local step = math.deg(BAG_L / ARC_R)
+        for row = 0, 2 do
+            local a = -ARC_DEG / 2 + step * 0.5 + ((row % 2 == 1) and step * 0.5 or 0)
+            while a <= ARC_DEG / 2 - step * 0.5 + 0.01 do
+                local r = math.rad(a)
+                bag(l, V(-ARC_R + ARC_R * math.cos(r), ARC_R * math.sin(r), row * (BAG_H - 1)), a + 90, BAG_L, BAG_W, BAG_H)
+                a = a + step
+            end
+        end
+    end }
+
+item{ id = "bags_corner", cat = 5, name = "Sandbags: corner", desc = "L shape, stackable", kind = "mesh", mat = "fabric", color = C_TAN,
+    place = "upright", grid = true, stack = stackH(3),
+    mnt = (function()
+        local a, b = FW2(0, 26, 0, true, 7, 30)
+        local c, d = FW2(0, 0, 40, false, 7, 30)
+        return FW(stackH(3), { a, b, c, d })
+    end)(),
+    col = function(l) box(l, V(-7, -7, 0), V(59, 7, stackH(3))) box(l, V(-7, 7, 0), V(7, 73, stackH(3))) end,
+    vis = function(l) bagRow(l, -7, 59, 0, 0, 3) bagRowY(l, 7, 73, 0, 0, 3) end }
+
+item{ id = "nest", cat = 5, name = "MG Nest", desc = "Sandbag half ring", kind = "mesh", mat = "fabric", color = C_TAN,
+    place = "upright", faceAway = true, stack = stackH(4),
+    mnt = (function()
+        local t = {}
+        for k = -2, 2 do
+            local f = Angle(0, k * 36, 0):getForward()
+            t[#t + 1] = { f.x * 52, f.y * 52, -f.x, -f.y, 7, 15 } t[#t + 1] = { f.x * 52, f.y * 52, f.x, f.y, 7, 15 }
+        end
+        return FW(stackH(4), t)
+    end)(),
+    col = function(l)
+        for k = -2, 2 do
+            local a = k * 36
+            local f = Angle(0, a, 0):getForward()
+            ybox(l, f * 52 + V(0, 0, stackH(4) / 2), a + 90, 17, 7, stackH(4) / 2)
+        end
+    end,
+    vis = function(l)
+        for row = 0, 3 do
+            for k = -6, 6 do
+                local a = k * 15 + ((row % 2 == 1) and 7.5 or 0)
+                if math.abs(a) <= 92 then
+                    local f = Angle(0, a, 0):getForward()
+                    bag(l, f * 52 + V(0, 0, row * (BAG_H - 1)), a + 90, 15, 13, 8)
+                end
+            end
+        end
+    end }
+
+local function wireCoil(l, len, r)
+    local q = {}
+    local turns, seg = math.floor(len / 7), 10
+    local thick = 0.35
+    local prev
+    for i = 0, turns * seg do
+        local t = i / (turns * seg)
+        local a = i / seg * math.pi * 2
+        local p = V(-len / 2 + len * t, math.cos(a) * r, r + math.sin(a) * r)
+        if prev then
+            local d = (p - prev):getNormalized()
+            local side = d:cross(V(0, 0, 1)):getNormalized() * thick
+            local upv = d:cross(side):getNormalized() * thick
+            q[#q + 1] = { prev - side, p - side, p + side, prev + side }
+            q[#q + 1] = { prev - upv, p - upv, p + upv, prev + upv }
+        end
+        prev = p
+    end
+    l[#l + 1] = { t = "quads", q = q }
+end
+item{ id = "wire", cat = 6, name = "Barbed Wire", desc = "Concertina, 128", kind = "mesh", mat = "plain", color = Color(90, 90, 85),
+    place = "upright", grid = true,
+    col = function(l) box(l, V(-64, -16, 0), V(64, 16, 34)) end,
+    vis = function(l)
+        wireCoil(l, 128, 16)
+        box(l, V(-66, -1, 0), V(-64, 1, 36)) box(l, V(64, -1, 0), V(66, 1, 36))
+    end }
+
+-- Jersey barrier: concrete road block
+item{ id = "jersey", cat = 6, name = "Jersey Barrier", desc = "Concrete road block", kind = "mesh", mat = "concrete", color = C_CONC,
+    place = "upright", grid = true, mnt = FW(32, { FW2(0, 0, 0, false, 12, 56) }),
+    col = function(l)
+        hex(l, { V(-12, -60, 0), V(12, -60, 0), V(12, 60, 0), V(-12, 60, 0), V(-7.5, -60, 12), V(7.5, -60, 12), V(7.5, 60, 12), V(-7.5, 60, 12) })
+        hex(l, { V(-7.5, -60, 12), V(7.5, -60, 12), V(7.5, 60, 12), V(-7.5, 60, 12), V(-4, -60, 32), V(4, -60, 32), V(4, 60, 32), V(-4, 60, 32) })
+    end,
+    vis = function(l)
+        box(l, V(-12, -60, 0), V(12, 60, 3))
+        hex(l, { V(-12, -60, 3), V(12, -60, 3), V(12, 60, 3), V(-12, 60, 3), V(-7.5, -60, 12), V(7.5, -60, 12), V(7.5, 60, 12), V(-7.5, 60, 12) })
+        hex(l, { V(-7.5, -60, 12), V(7.5, -60, 12), V(7.5, 60, 12), V(-7.5, 60, 12), V(-4, -60, 32), V(4, -60, 32), V(4, 60, 32), V(-4, 60, 32) })
+        box(l, V(-12.2, -40, 0), V(12.2, -32, 2.5)) box(l, V(-12.2, 32, 0), V(12.2, 40, 2.5))   -- lifting slots
+    end }
+
+do
+-- ---------------- watchtower ----------------
+-- 128x128 platform at 196, railing 42 high. Stairs = a steep wall of small blocks, every row sticks out
+-- a bit (rise 16.3 < step size 18, so you just walk up). Step collision lives in 2 extra hidden
+-- custom props (a prop can only have 10 convexes).
+local TW_P, TW_T, TW_R = 64, 196, 42
+local TW_STEPS, TW_RUN, TW_Y0, TW_Y1 = 12, 9, 16, 60
+local function stepX(k) return -TW_P - TW_RUN * (TW_STEPS - k + 1) end     -- front edge of step k
+local function towerSteps(k0, k1)
+    return function(l)
+        for k = k0, k1 do
+            box(l, V(stepX(k), TW_Y0, TW_T * (k - 1) / TW_STEPS), V(-TW_P, TW_Y1, TW_T * k / TW_STEPS))
+        end
+    end
+end
+local function towerShape(vis)
+    return function(l)
+        local P, T, R = TW_P, TW_T, TW_R
+        local lh = 52
+        for sx = -1, 1, 2 do for sy = -1, 1, 2 do                                  -- 4 legs
+            box(l, V(sx * lh - 4, sy * lh - 4, 0), V(sx * lh + 4, sy * lh + 4, T - 8))
+        end end
+        box(l, V(-P, -P, T - 8), V(P, P, T))                                      -- platform
+        box(l, V(P - 3, -P, T), V(P, P, T + R))                                   -- railings
+        box(l, V(-P, P - 3, T), V(P - 3, P, T + R))
+        box(l, V(-P, -P, T), V(P - 3, -P + 3, T + R))
+        box(l, V(-P, -P + 3, T), V(-P + 3, TW_Y0 - 4, T + R))                     -- (opening for the stairs)
+        if not vis then return end
+        -- block stairs: every row = bricks with gaps, sticking out 1.5 past the collision
+        local BW = 11
+        for k = 1, TW_STEPS do
+            local z0, z1 = T * (k - 1) / TW_STEPS, T * k / TW_STEPS
+            local x0 = stepX(k)
+            local off = (k % 2 == 0) and BW / 2 or 0
+            local y = TW_Y0 - off
+            while y < TW_Y1 - 0.5 do
+                local ya, yb = math.max(y, TW_Y0), math.min(y + BW, TW_Y1)
+                if yb - ya > 1 then
+                    box(l, V(x0 - 1.5, ya + 0.35, z0 + 0.35), V(x0 + TW_RUN, yb - 0.35, z1 - 0.35))
+                end
+                y = y + BW
+            end
+            if x0 + TW_RUN < -P - 0.5 then                                         -- the body of the row behind
+                box(l, V(x0 + TW_RUN, TW_Y0 + 0.5, z0), V(-P, TW_Y1 - 0.5, z1))
+            end
+        end
+        -- cross braces between the legs
+        for s = -1, 1, 2 do
+            beam(l, V(-lh, s * lh, 8), V(lh, s * lh, T - 16), 1.5, 2)
+            beam(l, V(lh, s * lh, 8), V(-lh, s * lh, T - 16), 1.5, 2)
+            beam(l, V(s * lh, -lh, 8), V(s * lh, lh, T - 16), 1.5, 2)
+            beam(l, V(s * lh, lh, 8), V(s * lh, -lh, T - 16), 1.5, 2)
+        end
+        -- roof on 4 posts
+        for sx = -1, 1, 2 do for sy = -1, 1, 2 do
+            box(l, V(sx * (P - 4) - 2, sy * (P - 4) - 2, T + R), V(sx * (P - 4) + 2, sy * (P - 4) + 2, T + 104))
+        end end
+        frustum(l, 0, 0, T + 104, P + 14, P + 14, 6, 6, 34)
+    end
+end
+item{ id = "tower", cat = 5, name = "Watchtower", desc = "Block stairs + rail", kind = "mesh", mat = "wood", color = C_WOOD,
+    place = "upright", faceAway = true,
+    col = function(l) towerShape(false)(l) towerSteps(1, TW_STEPS)(l) end, vis = towerShape(true),
+    mnt = { deck = TW_T, half = TW_P - 22, P = TW_R + 12 } }
+
+end
+-- ---------------- pillbox ----------------
+local PB_X, PB_Y, PB_H, PB_T = 80, 72, 84, 14
+local function pillboxCol(l)
+    local X, Y, H, t = PB_X, PB_Y, PB_H, PB_T
+    box(l, V(X - t, -Y, 0), V(X, Y, 54))             -- front wall under the firing slit
+    box(l, V(X - t, -Y, 68), V(X, Y, H))             -- front wall over the slit (slit 54..68 = eye height)
+    box(l, V(-X, -Y, 0), V(X - t, -Y + t, H))        -- sides
+    box(l, V(-X, Y - t, 0), V(X - t, Y, H))
+    box(l, V(-X, -Y + t, 0), V(-X + t, -26, H))      -- back with a door
+    box(l, V(-X, 26, 0), V(-X + t, Y - t, H))
+    box(l, V(-X - 6, -Y - 6, H), V(X + 6, Y + 6, H + 12))   -- roof slab
+end
+item{ id = "bunker", cat = 5, name = "Pillbox", desc = "Concrete, firing slit", kind = "mesh", mat = "concrete", color = C_CONC,
+    place = "upright", faceAway = true,
+    mnt = FW(54, { { PB_X - PB_T, 0, -1, 0, 0, PB_Y - PB_T - 18 } }, 64),     -- inside, barrel through the slit
+    col = pillboxCol,
+    vis = function(l)
+        pillboxCol(l)
+        bagRowY(l, -PB_Y, PB_Y, PB_X - 2, PB_H + 12, 1)                    -- bags on the roof edge
+        bagRow(l, -PB_X, PB_X - 12, -PB_Y + 4, PB_H + 12, 1)
+        bagRow(l, -PB_X, PB_X - 12, PB_Y - 4, PB_H + 12, 1)
+    end }
+
+item{ id = "twall", cat = 5, name = "T-Wall", desc = "Concrete blast wall", kind = "mesh", mat = "concrete", color = C_CONC,
+    place = "upright", grid = true, mnt = FW(128, { FW2(0, 0, 0, true, 28, 28) }),
+    col = function(l) box(l, V(-32, -28, 0), V(32, 28, 10)) box(l, V(-32, -7, 10), V(32, 7, 128)) end,
+    vis = function(l)
+        box(l, V(-32, -28, 0), V(32, 28, 10)) box(l, V(-32, -7, 10), V(32, 7, 124))
+        frustum(l, 0, 0, 124, 32, 7, 31, 5, 4)
+        ocyl(l, V(-20, 0, 128), V(-20, 0, 132), 2, 8) ocyl(l, V(20, 0, 128), V(20, 0, 132), 2, 8)
+    end }
+
+item{ id = "logs", cat = 5, name = "Log Barricade", desc = "Logs on X frames", kind = "mesh", mat = "wood", color = C_WOOD,
+    place = "upright", grid = true, mnt = FW(40, { FW2(0, 0, 0, true, 18, 58) }),
+    col = function(l) box(l, V(-64, -16, 0), V(64, 16, 40)) end,
+    vis = function(l)
+        for k = 0, 2 do
+            local z = 6.5 + k * 12.5
+            ocyl(l, V(-66, (k == 1) and 1 or -1, z), V(66, (k == 1) and -1 or 1, z), 6.5, 10)
+        end
+        for _, x in ipairs({ -52, 52 }) do
+            ocyl(l, V(x, -18, 0), V(x, 18, 44), 3.5, 8)
+            ocyl(l, V(x, 18, 0), V(x, -18, 44), 3.5, 8)
+        end
+    end }
+
+item{ id = "crate", cat = 5, name = "Supply Crate", desc = "Wood box, stackable", kind = "mesh", mat = "wood", color = C_WOOD,
+    place = "upright", grid = true, stack = 30,
+    mnt = (function() local a, b = FW2(0, 0, 0, false, 20, 14) local c, d = FW2(0, 0, 0, true, 16, 18) return FW(30, { a, b, c, d }) end)(),
+    col = function(l) box(l, V(-20, -16, 0), V(20, 16, 30)) end,
+    vis = function(l)
+        box(l, V(-19, -15, 0.5), V(19, 15, 29.5))
+        for sx = -1, 1, 2 do for sy = -1, 1, 2 do
+            box(l, V(sx * 20 - 1.5, sy * 16 - 1.5, 0), V(sx * 20 + 1.5, sy * 16 + 1.5, 30))
+        end end
+        for _, z in ipairs({ 0, 27 }) do
+            box(l, V(-20, -16, z), V(20, -14.5, z + 3)) box(l, V(-20, 14.5, z), V(20, 16, z + 3))
+            box(l, V(-20, -16, z), V(-18.5, 16, z + 3)) box(l, V(18.5, -16, z), V(20, 16, z + 3))
+        end
+        beam(l, V(-18, -15.6, 3), V(18, -15.6, 27), 1.5, 0.6)
+        beam(l, V(-18, 15.6, 3), V(18, 15.6, 27), 1.5, 0.6)
+    end }
+
+-- Hesco barrier: 2 wire-mesh cells filled with earth, stackable
+local HESCO_H = 52
+item{ id = "hesco", cat = 5, name = "Hesco Barrier", desc = "2 earth cells, stackable", kind = "mesh", mat = "fabric", color = Color(175, 160, 120),
+    place = "upright", grid = true, stack = HESCO_H, mnt = FW(HESCO_H, { FW2(0, 0, 0, false, 24, 46) }),
+    col = function(l) box(l, V(-24, -48, 0), V(24, 48, HESCO_H)) end,
+    vis = function(l)
+        box(l, V(-23.5, -47.5, 0), V(23.5, 47.5, HESCO_H - 1))
+        frustum(l, 0, -24, HESCO_H - 1, 22, 22, 15, 15, 3) frustum(l, 0, 24, HESCO_H - 1, 22, 22, 15, 15, 3)
+        for _, y in ipairs({ -48, 0, 48 }) do for sx = -1, 1, 2 do
+            box(l, V(sx * 24 - 0.8, y - 0.8, 0), V(sx * 24 + 0.8, y + 0.8, HESCO_H))
+        end end
+        for z = 0, HESCO_H, HESCO_H / 4 do
+            for sx = -1, 1, 2 do box(l, V(sx * 24 - 0.5, -48, z - 0.4), V(sx * 24 + 0.5, 48, z + 0.4)) end
+            for sy = -1, 1, 2 do box(l, V(-24, sy * 48 - 0.5, z - 0.4), V(24, sy * 48 + 0.5, z + 0.4)) end
+        end
+    end }
+
+end
+local ITEM_BY_ID = {}
+for _, it in ipairs(ITEMS) do ITEM_BY_ID[it.id] = it end
+
+-- mesh definitions: one per mesh/gun item + one per gun part (hologram)
+local MDEFS = {}
+local function mdef(key, fn, mat, it)
+    MDEFS[#MDEFS + 1] = { key = key, fn = fn, mat = mat, it = it }
+    MDEFS[#MDEFS].idx = #MDEFS
+    return #MDEFS
+end
+for _, it in ipairs(ITEMS) do
+    if it.kind == "mesh" or it.kind == "gun" then it.mdef = mdef(it.id, it.vis or it.col, it.mat, it) end
+    if it.kind == "gun" then
+        it.gdef = mdef(it.id .. ":gun", it.part, "metal", nil)
+        if it.mountVis then
+            it.mountDefs = {}
+            for k, fn in ipairs(it.mountVis) do it.mountDefs[k] = mdef(it.id .. ":m" .. k, fn, it.mat, it) end
+        end
+    end
+end
+
+-- ============================ PLACEMENT HELPERS (shared) ============================
+local function upFrame(n) return n:getAngle() + Angle(90, 0, 0) end
+
+-- angle with UP = n and forward as close as possible to yaw
+local function surfaceAngle(n, yaw)
+    local f0 = Angle(0, yaw, 0):getForward()
+    local f = f0 - n * f0:dot(n)
+    if f:getLength() < 0.01 then f = n:cross(V(0, 1, 0)) end
+    return f:getNormalized():getAngleEx(n)
+end
+
+local function aimTrace(ply, range, filter)
+    local eye = ply:getShootPos()
+    local f = { ply }
+    if filter then for _, e in ipairs(filter) do f[#f + 1] = e end end
+    return trace.line(eye, eye + ply:getAimVector() * range, f, MASK.SHOT), eye
+end
+
+local function badSurface(tr)
+    if not tr.Hit or tr.HitSky then return true end
+    local e = tr.Entity
+    return isValid(e) and (e:isPlayer() or e:isNPC() or e:isVehicle())
+end
+
+-- mortar: fixed tube angle, solve the muzzle speed: D*tan(th) - g/2*t^2 = dz, D = v*cos(th)*t
+local function mortarSolve(from, to, pitchDeg, g)
+    local dx, dy = to.x - from.x, to.y - from.y
+    local D = math.sqrt(dx * dx + dy * dy)
+    if D < 1 then return nil end
+    local th = math.rad(pitchDeg)
+    local k = D * math.tan(th) - (to.z - from.z)
+    if k <= 0 then return nil end
+    local t = math.sqrt(2 * k / g)
+    local c = math.cos(th)
+    return V(dx / D * c, dy / D * c, math.sin(th)), D / (t * c), t, D
+end
+
+-- grenade model fix (w_ models have offset origin / arbitrary axes)
+local function nadeFix(ent)
+    local mn, mx = ent:obbMins(), ent:obbMaxs()
+    local sz, c = mx - mn, (mn + mx) * 0.5
+    local rot, half
+    if sz.z >= sz.x and sz.z >= sz.y then rot, half = Angle(0, 0, 0), sz.z * 0.5
+    elseif sz.x >= sz.y then rot, half = Angle(-90, 0, 0), sz.x * 0.5
+    else rot, half = Angle(0, 0, 90), sz.y * 0.5 end
+    return { rot = rot, c = c, half = half }
+end
+local function nadeTransform(fix, center, frame)
+    local _, ang = localToWorld(V(), fix.rot, V(), frame)
+    local off = localToWorld(fix.c, Angle(), V(), ang)
+    return center - off, ang
+end
+
+local function wireOk(a, b, ignore)
+    local d = b - a
+    local len = d:getLength()
+    if len < 24 or len > 600 then return false, len end
+    local tr = trace.line(a, b - d / len * 3, ignore, MASK.SOLID)
+    return not tr.Hit, len
+end
+
+-- ================================ SERVER ================================
+if SERVER then
+    local O = owner()
+    local objs = {}          -- ent -> {it, eidx, armAt, ...}
+    local list = {}          -- array of ents (order)
+    local pendingTrip = nil  -- {prop, la, n, born}
+    local lastPlace = 0
+    local guns = {}          -- base ent -> gun state
+    local seatBase = {}      -- seat ent -> base ent
+    local extraOf = {}       -- hidden extra collision prop -> main object
+    local fireBullets = game.bulletDamage
+
+    pcall(enableHud, O, true)
+
+    local function countObjs()
+        local n = 0
+        for e in pairs(objs) do if isValid(e) then n = n + 1 end end
+        return n
+    end
+
+    local function sendState(msg)
+        local p = pendingTrip and isValid(pendingTrip.prop) and pendingTrip or nil
+        local c4 = 0
+        for e, o in pairs(objs) do if isValid(e) and o.it.logic == "c4" then c4 = c4 + 1 end end
+        net.start("it_state")
+        net.writeBool(p ~= nil)
+        if p then net.writeEntity(p.prop) net.writeVector(p.prop:localToWorld(p.la)) end
+        net.writeUInt(math.min(countObjs(), 65535), 16)
+        net.writeUInt(c4, 8)
+        net.writeString(msg or "")
+        net.send(O)
+    end
+
+    -- tell clients which mesh definition to put on an entity
+    -- def 255 = alias: a hidden extra collision prop that belongs to object "main"
+    local function sendReg(eidx, def, target, main)
+        net.start("it_reg")
+        net.writeUInt(eidx, 16)
+        net.writeUInt(def, 8)
+        if def == 255 then net.writeUInt(main or 0, 16) end
+        if target then net.send(target) else net.send() end
+    end
+    local function sendUnreg(eidx)
+        net.start("it_unreg")
+        net.writeUInt(eidx, 16)
+        net.send()
+    end
+
+    local function snd(ent, path, lvl, pitch, vol)
+        if isValid(ent) then pcall(ent.emitSound, ent, path, lvl or 75, pitch or 100, vol or 1) end
+    end
+
+    local function explodeAt(pos, radius, damage, big, noProp)
+        local done = false
+        if USE_WIRE_EXPLOSIVE and not noProp and prop.canSpawn() then
+            done = pcall(function()
+                local ent = prop.createSent(pos, Angle(), "gmod_wire_explosive", true, {
+                    damage = damage, radius = radius, removeafter = true,
+                    Model = "models/bull/gates/logic_nano.mdl",
+                })
+                ent:setSolid(false)
+                ent:setNoDraw(true)
+                ent:getWirelink()["Detonate"] = 1
+            end)
+        end
+        if not done then pcall(game.blastDamage, pos, radius, damage) end
+        if big then pcall(effect.create, "HelicopterMegaBomb", { origin = pos }, true) end
+        pcall(effect.create, "Explosion", { origin = pos, magnitude = big and 300 or 100, scale = big and 3 or 1.3, radius = radius }, true)
+        local gtr = trace.line(pos + V(0, 0, 10), pos - V(0, 0, 150), nil, MASK.SOLID_BRUSHONLY)
+        if gtr.Hit then pcall(effect.create, "ThumperDust", { origin = gtr.HitPos, scale = big and 700 or 250 }, true) end
+    end
+
+    -- ---------------- flying shells (mortar + artillery): simple ballistic sim ----------------
+    local shells, booms = {}, {}
+    local function spawnShell(pos, vel, sp, ignore, op)
+        local sh = { pos = pos, vel = vel, sp = sp, ignore = ignore, born = timer.curtime(), op = op }
+        if hologram.canSpawn() then
+            local h = hologram.create(pos, upFrame(vel), HM .. "cylinder.mdl")
+            if h then
+                pcall(h.setSize, h, V(4, 4, 15))
+                pcall(h.setColor, h, Color(60, 66, 52))
+                pcall(h.setTrails, h, 28, 0, 4, "trails/smoke", Color(225, 225, 225))   -- white smoke trail
+                sh.holo = h
+            end
+        end
+        shells[#shells + 1] = sh
+    end
+    local function shellTick(now, dt)
+        for i = #shells, 1, -1 do
+            local sh = shells[i]
+            local g = sh.sp.g
+            local np = sh.pos + sh.vel * dt - V(0, 0, 0.5 * g * dt * dt)   -- exact ballistic step
+            local nv = sh.vel - V(0, 0, g * dt)
+            local tr = trace.line(sh.pos, np, sh.ignore and { sh.ignore } or nil, MASK.SHOT)
+            local inSky = tr.HitSky or tr.StartSolid                   -- above the skybox: keep flying
+            if (tr.Hit and not inSky) or now - sh.born > 40 then
+                table.remove(shells, i)
+                local hp = tr.HitPos + tr.HitNormal * 4
+                local hh = sh.holo
+                if isValid(hh) then                                     -- keep the holo a moment: trail fades, sound plays
+                    pcall(function() hh:setPos(hp) hh:setNoDraw(true) end)
+                    timer.simple(3, function() if isValid(hh) then hh:remove() end end)
+                end
+                if tr.Hit and not inSky then
+                    explodeAt(hp, sh.sp.r, sh.sp.d, sh.sp.big, true)
+                    snd(hh, "weapons/mortar/mortar_explode" .. math.random(1, 3) .. ".wav", 140, math.random(95, 105), 1)
+                    if sh.op then booms[#booms + 1] = { pos = hp, t = now, r = sh.sp.r, op = sh.op } end
+                end
+            else
+                sh.pos, sh.vel = np, nv
+                if isValid(sh.holo) then
+                    pcall(function() sh.holo:setPos(np) sh.holo:setAngles(upFrame(nv)) end)
+                    if not sh.whistled and nv.z < 0 then
+                        local ahead = trace.line(np, np + nv * 1.2, nil, MASK.SOLID_BRUSHONLY)
+                        if ahead.Hit and not ahead.StartSolid then
+                            sh.whistled = true
+                            snd(sh.holo, "weapons/mortar/mortar_shell_incomming1.wav", 140, math.random(95, 105), 1)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- ---------------- manned guns: mount / unmount ----------------
+    local function sendMount(ply, s, on)
+        net.start("it_mnt")
+        net.writeBool(on)
+        if on then
+            net.writeUInt(s.hidx or 0, 16)
+            net.writeUInt(s.it.idx, 8)
+        end
+        net.send(ply)
+    end
+
+    local function setOperator(s, op)
+        if s.op == op then return end
+        if isValid(s.op) then
+            if s.viewSet then pcall(s.op.setViewEntity, s.op) end
+            pcall(sendMount, s.op, s, false)
+            if s.op ~= O then pcall(enableHud, s.op, false) end
+        end
+        s.viewSet = false
+        if isValid(s.camHolo) then s.camHolo:remove() end
+        s.camHolo = nil
+        s.op = op
+        if op then
+            -- a player sitting in a vehicle of the chip owner may get the HUD (calcview / scope / crosshair)
+            if op ~= O then pcall(enableHud, op, true) end
+            pcall(sendMount, op, s, true)
+            s.nextSend = 0
+            s.rPrev, s.aPrev = true, true
+        end
+    end
+
+    local function destroyGun(e)
+        local s = guns[e]
+        if not s then return end
+        guns[e] = nil
+        setOperator(s, nil)
+        if s.seat then
+            seatBase[s.seat] = nil
+            if isValid(s.seat) then s.seat:remove() end
+        end
+        if s.hidx then sendUnreg(s.hidx) end
+        if isValid(s.holo) then s.holo:remove() end
+    end
+
+    local function unregister(e)
+        local o = objs[e]
+        if not o then return end
+        objs[e] = nil
+        if o.wire and isValid(o.wire) then o.wire:remove() end
+        if o.anchor and isValid(o.anchor) then o.anchor:remove() end
+        if o.extras then
+            for _, x in ipairs(o.extras) do
+                extraOf[x] = nil
+                if isValid(x) then x:remove() end
+            end
+        end
+        destroyGun(e)
+        if o.eidx then sendUnreg(o.eidx) end
+    end
+
+    local function removeObj(e)
+        unregister(e)
+        if isValid(e) then e:remove() end
+        sendState()
+    end
+
+    local BOOM = {
+        at   = { r = 350, d = 600, big = true },
+        ap   = { r = 140, d = 110 },
+        trip = { r = 260, d = 200 },
+        clay = { r = 180, d = 170, fwd = 70 },
+        bounce = { r = 230, d = 160 },
+        c4   = { r = 300, d = 350, big = true },
+        laser = { r = 220, d = 190 },
+        ied  = { r = 330, d = 360, big = true },
+        timed = { r = 320, d = 330, big = true },
+    }
+
+    local function detonate(e)
+        local o = objs[e]
+        if not o or not isValid(e) then return end
+        local b = BOOM[o.it.logic]
+        if not b then removeObj(e) return end
+        local pos = e:obbCenterW()
+        if b.fwd then pos = pos + e:getForward() * b.fwd end
+        removeObj(e)
+        explodeAt(pos, b.r, b.d, b.big)
+    end
+
+    local function fuse(e, delay, sound)
+        local o = objs[e]
+        if not o or o.fuseAt then return end
+        o.fuseAt = timer.curtime() + delay
+        if sound then snd(e, sound, 80, 100, 1) end
+        if o.wire and isValid(o.wire) then o.wire:remove() o.wire = nil end
+    end
+
+    -- ---------------- placement ----------------
+    local function placeMesh(it, pos, ang, colFn)
+        local col = {}
+        ;(colFn or it.col)(col)
+        local convexes, rest = {}, {}                -- a prop holds 10 convexes, the rest -> hidden extra props
+        for i, pr in ipairs(col) do
+            local k = math.floor((i - 1) / 10)
+            if k == 0 then
+                convexes[#convexes + 1] = primPoints(pr)
+            else
+                rest[k] = rest[k] or {}
+                rest[k][#rest[k] + 1] = primPoints(pr)
+            end
+        end
+        local ok, p = pcall(prop.createCustom, pos, ang, convexes, true)
+        if not ok or not isValid(p) then return nil, tostring(p) end
+        pcall(p.setColor, p, it.color or Color(255, 255, 255))
+        return p, nil, rest
+    end
+
+    local function gunSeat(base, s)
+        if not isValid(base) or guns[base] ~= s or isValid(s.seat) then return end
+        s.tries = s.tries + 1
+        if s.tries > 20 then return end
+        if not prop.canSpawn() then timer.simple(0.5, function() gunSeat(base, s) end) return end
+        local ok, seat = pcall(prop.createSeat, base:localToWorld(s.seatPos), base:getAngles() + Angle(0, -90, 0), SEAT_MODEL, true)
+        if not ok or not isValid(seat) then timer.simple(1, function() gunSeat(base, s) end) return end
+        s.seat = seat
+        seatBase[seat] = base
+        if SEAT_HIDDEN then pcall(seat.setNoDraw, seat, true) end
+    end
+
+    local function placeGun(it, pos, ang, lvl)
+        local base, err, rest = placeMesh(it, pos, ang, (lvl > 0 and it.mountCol) and it.mountCol[lvl] or nil)
+        if not base then return nil, err end
+        local g, geo = GUN_STATS[it.gun], GUN_GEO[it.gun]
+        local s = { it = it, g = g, geo = geo, yaw = 0, pitch = 0, ammo = g.mag, heat = 0, nextFire = 0, tries = 0, shots = 0,
+                    pivot = gunPivot(it.gun, lvl), seatPos = gunSeatPos(it.gun, lvl), lvl = lvl }
+        if hologram.canSpawn() then
+            local h = hologram.create(base:localToWorld(s.pivot), base:getAngles(), HM .. "box.mdl")
+            if h then
+                pcall(h.setColor, h, it.color or C_GUN)
+                h:setParent(base)
+                s.holo, s.hidx = h, h:entIndex()
+            end
+        end
+        guns[base] = s
+        if g.mortar then
+            s.pitch, s.mpitch = -45, 45
+            if isValid(s.holo) then pcall(s.holo.setLocalAngles, s.holo, Angle(-45, 0, 0)) end
+        end
+        if s.seatPos then timer.simple(0.35, function() gunSeat(base, s) end) end
+        return base, nil, rest
+    end
+
+    -- hidden extra collision props (convexes 11+), spawned one by one (prop burst 4/s)
+    local function spawnExtras(p, o, chunks)
+        if not chunks or #chunks == 0 then return end
+        o.extras = {}
+        local function nextOne(i, tries)
+            if not isValid(p) or objs[p] ~= o or i > #chunks then return end
+            if not prop.canSpawn() then
+                if tries < 40 then timer.simple(0.3, function() nextOne(i, tries + 1) end) end
+                return
+            end
+            local ok, x = pcall(prop.createCustom, p:getPos(), p:getAngles(), chunks[i], true)
+            if ok and isValid(x) then
+                pcall(x.setNoDraw, x, true)
+                o.extras[#o.extras + 1] = x
+                extraOf[x] = p
+                sendReg(x:entIndex(), 255, nil, o.eidx)
+                timer.simple(0.27, function() nextOne(i + 1, 0) end)
+            elseif tries < 10 then
+                timer.simple(0.5, function() nextOne(i, tries + 1) end)
+            else
+                sendState("Extra collision failed: " .. string.sub(tostring(x), 1, 50))
+            end
+        end
+        timer.simple(0.27, function() nextOne(1, 0) end)
+    end
+
+    -- trench grid cells covered by a piece (1 or 2x2)
+    local function trenchCells(pos, ang, size)
+        if (size or 1) < 2 then return { pos } end
+        local f, r, h = ang:getForward(), ang:getRight(), TRENCH_CELL / 2
+        return { pos + f * h + r * h, pos + f * h - r * h, pos - f * h + r * h, pos - f * h - r * h }
+    end
+    local function trenchOverlaps(pos, ang, it)
+        local mine, hit = trenchCells(pos, ang, it.size), {}
+        for e, o in pairs(objs) do
+            if isValid(e) and o.it.place == "trench" then
+                local found = false
+                for _, a in ipairs(trenchCells(e:getPos(), e:getAngles(), o.it.size)) do
+                    for _, b in ipairs(mine) do
+                        if a:getDistance(b) < 40 then found = true end
+                    end
+                end
+                if found then hit[#hit + 1] = e end
+            end
+        end
+        return hit
+    end
+
+    local function doPlace(it, pos, ang, normal, lvl, rep)
+        local now = timer.curtime()
+        if now - lastPlace < PLACE_COOLDOWN * 0.8 then return end
+        if MAX_OBJECTS > 0 and countObjs() >= MAX_OBJECTS then sendState("Object limit: " .. MAX_OBJECTS) return end
+        if not prop.canSpawn() then sendState("Prop limit, wait") return end
+        if pos:getDistance(O:getShootPos()) > PLACE_RANGE + 200 then sendState("Too far") return end
+        if it.place == "trench" then
+            local ov = trenchOverlaps(pos, ang, it)
+            -- replacing an existing trench piece / adding a cover: same footprint -> remove the old one first
+            if rep and rep > 0 and #ov == 1 and ov[1]:entIndex() == rep and (objs[ov[1]].it.size or 1) == (it.size or 1) then
+                unregister(ov[1])
+                ov[1]:remove()
+            elseif #ov > 0 then
+                sendState("Cell is taken") return
+            end
+        end
+        lastPlace = now
+
+        if it.kind == "tripwire" then
+            if pendingTrip then return end
+            local ok, p = pcall(prop.create, pos + normal * 4, upFrame(normal), it.model, true)
+            if not ok or not isValid(p) then sendState("Can't create grenade") return end
+            local fix = nadeFix(p)
+            local center = pos + normal * (fix.half + 0.3)
+            local pp, pa = nadeTransform(fix, center, upFrame(normal))
+            pcall(function() p:setPos(pp) p:setAngles(pa) end)
+            local tr = trace.line(pos + normal * 2, pos - normal * 4, { p, O })
+            if isValid(tr.Entity) and not tr.HitWorld then pcall(p.setParent, p, tr.Entity) end
+            objs[p] = { it = it, n = normal, la = p:worldToLocal(center + normal * fix.half) }
+            pendingTrip = { prop = p, la = objs[p].la, n = normal, born = now }
+            snd(p, "weapons/slam/mine_mode.wav", 70, 110, 0.8)
+            sendState()
+            return
+        end
+
+        local p, err, rest
+        if it.kind == "gun" then p, err, rest = placeGun(it, pos, ang, lvl) else p, err, rest = placeMesh(it, pos, ang) end
+        if not p then sendState("Spawn failed: " .. string.sub(err or "?", 1, 60)) return end
+        local trap = it.logic and BOOM[it.logic] ~= nil
+        local o = { it = it, eidx = p:entIndex(), armAt = trap and (now + ARM_TIME) or nil,
+                    mdef = (it.kind == "gun" and lvl > 0 and it.mountDefs) and it.mountDefs[lvl] or it.mdef }
+        objs[p] = o
+        list[#list + 1] = p
+        sendReg(o.eidx, o.mdef)
+        spawnExtras(p, o, rest)
+        local s = guns[p]
+        if s and s.hidx then sendReg(s.hidx, it.gdef) end
+        if it.logic == "laser" then                                -- red beam along the mine's up axis
+            local a, up = p:getPos() + p:getUp() * 5, p:getUp()
+            local tr = trace.line(a, a + up * LASER_RANGE, { p, O }, MASK.SHOT)
+            o.beamLen = math.max(LASER_RANGE * tr.Fraction, 12)
+            if hologram.canSpawn() then
+                local w = hologram.create(a + up * (o.beamLen / 2), upFrame(up), HM .. "cylinder.mdl")
+                if w then
+                    pcall(w.setSize, w, V(0.3, 0.3, o.beamLen))
+                    pcall(w.setColor, w, Color(255, 30, 20, 170))
+                    pcall(w.setMaterial, w, "models/debug/debugwhite")
+                    pcall(w.setParent, w, p)
+                    o.wire = w
+                end
+            end
+        elseif it.logic == "timed" then
+            o.fuseAt, o.nextBeep, o.armAt = now + TIMED_FUSE, now, nil
+        end
+        if it.logic == "alarm" or it.logic == "radar" or it.logic == "decoy" then
+            o.armAt = now + 1
+            snd(p, "buttons/blip1.wav", 70, 120, 0.8)
+        elseif it.logic == "timed" then
+            snd(p, "weapons/c4/c4_plant.wav", 75, 100, 1)
+        elseif trap then
+            snd(p, "weapons/slam/mine_mode.wav", 70, 100, 0.7)
+            timer.simple(ARM_TIME, function() if isValid(p) and objs[p] then snd(p, "buttons/blip1.wav", 65, 140, 0.6) end end)
+        else
+            snd(p, "physics/concrete/concrete_impact_soft" .. math.random(1, 3) .. ".wav", 70, 100, 0.7)
+        end
+        sendState()
+    end
+
+    local function stretchWire(b, hitNormal)
+        local pt = pendingTrip
+        if not pt or not isValid(pt.prop) then pendingTrip = nil sendState() return end
+        local p = pt.prop
+        local a = p:localToWorld(pt.la)
+        local ok, len = wireOk(a, b, { p, O })
+        if not ok then sendState(len > 600 and "Too long" or (len < 24 and "Too short" or "Something is in the way")) return end
+        local o = objs[p]
+        o.b = b
+        o.armAt = timer.curtime() + 1.5
+        local dir = (b - a) / len
+        if hologram.canSpawn() then
+            local w = hologram.create((a + b) / 2, upFrame(dir), HM .. "cylinder.mdl")
+            if w then w:setSize(V(0.35, 0.35, len)) w:setColor(Color(80, 80, 70)) w:setParent(p) o.wire = w end
+        end
+        if hologram.canSpawn() then
+            local an = hologram.create(b + hitNormal * 1.5, upFrame(hitNormal), HM .. "cylinder.mdl")
+            if an then an:setSize(V(0.8, 0.8, 3)) an:setColor(Color(120, 115, 100)) o.anchor = an end
+        end
+        list[#list + 1] = p
+        pendingTrip = nil
+        snd(p, "weapons/slam/mine_mode.wav", 70, 90, 0.8)
+        sendState()
+    end
+
+    local function removeAimed()
+        if pendingTrip then
+            local p = pendingTrip.prop
+            pendingTrip = nil
+            if isValid(p) then removeObj(p) end
+            sendState("Cancelled")
+            return
+        end
+        local tr = aimTrace(O, PLACE_RANGE + 200)
+        local e = tr.Entity
+        if isValid(e) and seatBase[e] then e = seatBase[e] end
+        if isValid(e) and extraOf[e] then e = extraOf[e] end
+        if isValid(e) and objs[e] then
+            if objs[e].fuseAt and objs[e].it.logic ~= "timed" then return end   -- timed charge can be defused
+            snd(e, "buttons/lever7.wav", 70, 110, 0.8)
+            removeObj(e)
+            sendState("Removed")
+        else
+            sendState("Look at your object")
+        end
+    end
+
+    local function clearAll()
+        pendingTrip = nil
+        for e in pairs(objs) do
+            unregister(e)
+            if isValid(e) then e:remove() end
+        end
+        objs, list = {}, {}
+        sendState("All removed")
+    end
+
+    -- ---------------- commands ----------------
+    -- 1 place(item, pos, ang, normal) 2 wire(pos, normal) 3 remove 4 detonate 5 clear all
+    net.receive("it_cmd", function(len, ply)
+        if ply ~= O then return end
+        local act = net.readUInt(4)
+        if act == 5 then clearAll() return end
+        if act == 4 then
+            local k = 0
+            for e, o in pairs(objs) do
+                if isValid(e) and o.it.logic == "c4" and not o.fuseAt then
+                    k = k + 1
+                    fuse(e, 0.05 + k * 0.08, "buttons/button17.wav")
+                end
+            end
+            if k == 0 then sendState("No C4 placed") end
+            return
+        end
+        if not holdsTool(O) then return end
+        if act == 1 then
+            local idx = net.readUInt(8)
+            local pos, ang, n = net.readVector(), net.readAngle(), net.readVector()
+            local lvl = net.readUInt(4)
+            local rep = net.readUInt(16)
+            local it = ITEMS[idx]
+            if it and it.kind ~= "cover" then
+                if it.kind ~= "gun" or not it.mountDefs or lvl > #MOUNT_LEVELS then lvl = 0 end
+                doPlace(it, pos, ang, n, lvl, rep)
+            end
+        elseif act == 2 then
+            local b, n = net.readVector(), net.readVector()
+            stretchWire(b, n)
+        elseif act == 3 then
+            removeAimed()
+        end
+    end)
+
+    -- ---------------- triggers ----------------
+    local VEH_PAT = { "vehicle", "glide", "lvs", "lfs", "simfphys", "tank", "wac", "apc" }
+    local function isVehicleLike(e)
+        if seatBase[e] or extraOf[e] then return false end         -- our own gun seats / stairs
+        if e:isPlayer() then
+            local v = e:getVehicle()
+            if isValid(v) and seatBase[v] then return false end
+            return e:inVehicle()
+        end
+        if e:isVehicle() then return true end
+        local c = e:getClass()
+        for _, k in ipairs(VEH_PAT) do if string.find(c, k, 1, true) then return true end end
+        if c == "prop_physics" or c == "starfall_prop" then
+            if objs[e] then return false end
+            local ok, m = pcall(function() return e:getPhysicsObject():getMass() end)
+            return ok and m and m >= 500 and e:getVelocity():getLength() > 20
+        end
+        return false
+    end
+    local function isInfantry(e)
+        if e:isPlayer() then return e:isAlive() and not e:inVehicle() and not (OWNER_SAFE and e == O) end
+        return e:isNPC()
+    end
+    local function visible(a, e, self)
+        local tr = trace.line(a, e:obbCenterW(), { self }, MASK.SHOT)
+        return not tr.Hit or tr.Entity == e
+    end
+
+    -- artillery strike around a beacon
+    -- recon radar + motion alarm targets -> owner HUD
+    local radarPrev, radarTick = 0, 0
+    local function sendRadar(now)
+        local pts, seen = {}, {}
+        local function add(t)
+            if not seen[t] and #pts < 24 then seen[t] = true pts[#pts + 1] = t:getPos() end
+        end
+        for e, o in pairs(objs) do
+            if isValid(e) and o.armAt and now >= o.armAt then
+                if o.it.logic == "radar" then
+                    for _, t in ipairs(find.inSphere(e:getPos(), RADAR_RANGE)) do
+                        if isValid(t) and t ~= O and ((t:isPlayer() and t:isAlive()) or t:isNPC()) then add(t) end
+                    end
+                elseif o.it.logic == "alarm" and o.alarmT and isValid(o.alarmT) and now < (o.alarmUntil or 0) then
+                    add(o.alarmT)
+                end
+            end
+        end
+        if #pts == 0 and radarPrev == 0 then return end
+        radarPrev = #pts
+        net.start("it_radar")
+        net.writeUInt(#pts, 6)
+        for _, v in ipairs(pts) do net.writeVector(v) end
+        net.send(O)
+    end
+
+    timer.create("it_scan", 0.1, 0, function()
+        local now = timer.curtime()
+        radarTick = radarTick + 1
+        if radarTick % 5 == 0 then sendRadar(now) end
+        if pendingTrip and (not isValid(pendingTrip.prop) or now - pendingTrip.born > 60) then
+            local p = pendingTrip.prop
+            pendingTrip = nil
+            if isValid(p) then removeObj(p) end
+        end
+        for e, o in pairs(objs) do
+            if not isValid(e) then
+                unregister(e)
+            elseif o.fuseAt then
+                if now >= o.fuseAt then
+                    detonate(e)
+                elseif o.it.logic == "timed" and now >= (o.nextBeep or 0) then   -- beeps faster at the end
+                    o.nextBeep = now + clamp((o.fuseAt - now) / 8, 0.1, 1)
+                    snd(e, "buttons/blip1.wav", 80, 130, 1)
+                end
+            elseif o.armAt and now >= o.armAt then
+                local lg = o.it.logic
+                local pos = e:getPos()
+                if lg == "at" then
+                    for _, t in ipairs(find.inSphere(pos + e:getUp() * 20, 75)) do
+                        if t ~= e and isValid(t) and isVehicleLike(t) then fuse(e, 0.05, "buttons/button16.wav") break end
+                    end
+                elseif lg == "ap" then
+                    for _, t in ipairs(find.inSphere(pos, 42)) do
+                        if isValid(t) and isInfantry(t) then fuse(e, 0.25, "buttons/button16.wav") break end
+                    end
+                elseif lg == "bounce" then
+                    for _, t in ipairs(find.inSphere(pos, 64)) do
+                        if isValid(t) and isInfantry(t) then
+                            fuse(e, 0.45, "weapons/grenade/tick1.wav")
+                            pcall(function()                                -- jumps up, explodes in the air
+                                local ph = e:getPhysicsObject()
+                                ph:enableMotion(true) ph:wake()
+                                ph:setVelocity(e:getUp() * 270)
+                            end)
+                            break
+                        end
+                    end
+                elseif lg == "ied" then
+                    for _, t in ipairs(find.inSphere(pos + e:getUp() * 10, 58)) do
+                        if t ~= e and isValid(t) and (isInfantry(t) or isVehicleLike(t)) then fuse(e, 0.15, "buttons/button16.wav") break end
+                    end
+                elseif lg == "laser" and o.beamLen then
+                    local up = e:getUp()
+                    local a = e:getPos() + up * 5
+                    local filter = { e }
+                    if OWNER_SAFE then filter[#filter + 1] = O end
+                    local tr = trace.line(a, a + up * (o.beamLen - 2), filter, MASK.SHOT)
+                    local t = tr.Entity
+                    if tr.Hit and not tr.HitWorld and isValid(t) and not objs[t] and not extraOf[t] then
+                        fuse(e, 0.12, "buttons/button16.wav")
+                    end
+                elseif lg == "decoy" then                               -- fake gunfire bursts
+                    if now >= (o.nextDecoy or 0) then
+                        local kinds = { { "weapons/ar2/fire1.wav", 0.1, 8 }, { "weapons/smg1/smg1_fire1.wav", 0.08, 10 },
+                                        { "weapons/357/357_fire2.wav", 0.7, 3 }, { "weapons/pistol/pistol_fire2.wav", 0.28, 5 } }
+                        local k = kinds[math.random(1, #kinds)]
+                        local n = math.random(math.max(1, k[3] - 4), k[3])
+                        o.nextDecoy = now + n * k[2] + math.rand(2, 6)
+                        for j = 0, n - 1 do
+                            timer.simple(j * k[2] * math.rand(0.85, 1.2), function()
+                                if isValid(e) and objs[e] then snd(e, k[1], 100, math.random(94, 106), 1) end
+                            end)
+                        end
+                    end
+                elseif lg == "alarm" then
+                    if now >= (o.nextAlarm or 0) then
+                        local eye = pos + e:getUp() * 4
+                        for _, t in ipairs(find.inSphere(pos, ALARM_RANGE)) do
+                            if isValid(t) and t ~= O and isInfantry(t) and visible(eye, t, e) then
+                                o.nextAlarm, o.alarmT, o.alarmUntil = now + 6, t, now + 4
+                                snd(e, "ambient/alarms/klaxon1.wav", 100, 100, 1)
+                                sendState("ALARM! Motion at a sensor")
+                                break
+                            end
+                        end
+                    end
+                elseif lg == "clay" then
+                    local fwd = e:getForward()
+                    for _, t in ipairs(find.inSphere(pos, 220)) do
+                        if isValid(t) and isInfantry(t) then
+                            local d = t:obbCenterW() - pos
+                            if fwd:dot(d:getNormalized()) > 0.64 and visible(pos + V(0, 0, 8), t, e) then
+                                fuse(e, 0.1, "buttons/button16.wav")
+                                break
+                            end
+                        end
+                    end
+                elseif lg == "trip" and o.b then
+                    local a = e:localToWorld(o.la)
+                    local d = o.b - a
+                    local len = d:getLength()
+                    if len > 650 then
+                        fuse(e, 0.7, "weapons/grenade/tick1.wav")
+                    else
+                        local filter = { e }
+                        local par = e:getParent()
+                        if isValid(par) then filter[#filter + 1] = par end
+                        if OWNER_SAFE then filter[#filter + 1] = O end
+                        local tr = trace.line(a, a + d * ((len - 3) / len), filter, MASK.SOLID)
+                        if tr.Hit and not tr.HitWorld and isValid(tr.Entity) then
+                            fuse(e, 0.7, "weapons/grenade/tick1.wav")
+                            pcall(function()
+                                e:setParent()
+                                local ph = e:getPhysicsObject()
+                                ph:enableMotion(true) ph:wake()
+                                ph:setVelocity(o.n * 230 + V(0, 0, 120))
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- ---------------- manned guns: aim, fire, reload, heat ----------------
+    local function approach(cur, target, step)
+        if math.abs(target - cur) <= step then return target end
+        return cur + (target > cur and step or -step)
+    end
+
+    local function afterShot(h, g, s, now)
+        if g.bolt then
+            timer.simple(0.45, function() if isValid(h) then snd(h, g.bolt, 70, 100, 0.9) end end)
+        end
+        if s.ammo <= 0 then
+            s.reloadAt = now + g.reload
+            snd(h, g.rel1, 70, 100, 1)
+        end
+    end
+
+    local function gunShoot(base, s, now)
+        local g, h = s.g, s.holo
+        if game.canFireBullets and not game.canFireBullets(g.dmg, 1) then return end   -- SF bullet burst budget
+        local ml = s.geo.muzzle
+        if g.twin then
+            s.side = not s.side
+            if s.side then ml = s.geo.muzzle2 end
+        end
+        local muzzle = h:localToWorld(ml)
+        local dir = h:getForward()
+        local hitPos
+        local ok = pcall(fireBullets, muzzle, dir, g.dmg, 1, g.force, 30000, V(g.spread, g.spread, 0), 0, base,
+            function(att, tr) hitPos = tr.HitPos end)
+        if not ok then s.nextFire = now + 0.25 return end
+        s.ammo = s.ammo - 1
+        s.heat = s.heat + g.heatPer
+        s.nextFire = now + g.rate
+        s.shots = s.shots + 1
+        snd(h, g.snd, g.lvl, g.pitch + math.random(-4, 4), 1)
+        pcall(effect.create, "MuzzleFlash", { origin = muzzle, angles = h:getAngles(), flags = g.flash }, true)
+        if s.shots % g.tracerEvery == 0 then
+            pcall(effect.create, g.tracer, { start = muzzle, origin = hitPos or (muzzle + dir * 8000), scale = 9000 }, true)
+        end
+        if not g.blast then
+            pcall(effect.create, "RifleShellEject", { origin = h:localToWorld(V(-4, 3, 2)), angles = h:getAngles() + Angle(0, 90, 0) }, true)
+        end
+        -- explosive rounds (AT gun / flak): blast where the round hit (not right at the muzzle)
+        if g.blast and hitPos and hitPos:getDistance(muzzle) > 120 then
+            if g.blast.small then
+                pcall(game.blastDamage, hitPos, g.blast.r, g.blast.d)
+                pcall(effect.create, "Explosion", { origin = hitPos, magnitude = 1, scale = 0.5, radius = g.blast.r, flags = 4 }, true)
+            else
+                explodeAt(hitPos, g.blast.r, g.blast.d, false, true)
+            end
+        end
+        afterShot(h, g, s, now)
+    end
+
+    local function aimAt(base, s, worldPos, dt)
+        local g = s.g
+        local d = base:worldToLocal(worldPos) - s.pivot
+        local ty = clamp(math.deg(math.atan2(d.y, d.x)), -g.yaw, g.yaw)
+        local tp = clamp(-math.deg(math.atan2(d.z, math.sqrt(d.x * d.x + d.y * d.y))), -g.up, g.down)
+        return ty, tp
+    end
+    local function turnTo(s, ty, tp, dt)
+        local g, h = s.g, s.holo
+        local ny, np = approach(s.yaw, ty, g.turn * dt), approach(s.pitch, tp, g.turn * dt)
+        if math.abs(ny - s.yaw) > 0.01 or math.abs(np - s.pitch) > 0.01 then
+            s.yaw, s.pitch = ny, np
+            h:setLocalAngles(Angle(s.pitch, s.yaw, 0))
+        end
+    end
+
+    -- mortar: fixed tube angle (gunner picks it), muzzle speed solved for the target point (from the drone camera)
+    local function mortarFire(base, s, target, pitch, now)
+        local g, h = s.g, s.holo
+        if not isValid(h) or s.reloadAt or s.ammo <= 0 or now < s.nextFire then return end
+        pitch = clamp(pitch, 20, 85)
+        local piv = base:localToWorld(s.pivot)
+        local D = V(target.x - piv.x, target.y - piv.y, 0):getLength()
+        if D < MORTAR_MIN or D > MORTAR_MAX + 60 then return end
+        local dir = mortarSolve(piv, target, pitch, g.mortar.g)
+        if not dir then return end
+        local muzzle = piv + dir * s.geo.muzzle.x
+        local dir2, v0 = mortarSolve(muzzle, target, pitch, g.mortar.g)
+        if not dir2 then return end
+        local ld = base:worldToLocal(piv + dir2) - base:worldToLocal(piv)
+        s.yaw, s.pitch = math.deg(math.atan2(ld.y, ld.x)), -pitch
+        pcall(h.setLocalAngles, h, Angle(s.pitch, s.yaw, 0))
+        spawnShell(muzzle, dir2 * v0, g.mortar, base, s.op)
+        s.ammo = s.ammo - 1
+        s.nextFire = now + g.rate
+        snd(h, g.snd, g.lvl, g.pitch + math.random(-4, 4), 1)
+        pcall(effect.create, "MuzzleFlash", { origin = muzzle, angles = dir2:getAngle(), flags = g.flash }, true)
+        pcall(effect.create, "ThumperDust", { origin = base:getPos(), scale = 120 }, true)
+        afterShot(h, g, s, now)
+    end
+
+    local function gunTick(base, s, now, dt)
+        local g, h = s.g, s.holo
+        local op = isValid(s.seat) and s.seat:getDriver() or nil
+        if not isValid(op) then op = nil end
+        setOperator(s, op)
+
+        -- cooling / reload progress run even without a gunner
+        s.heat = math.max(0, s.heat - g.cool * dt)
+        if s.over and s.heat <= 0.35 then s.over = false end
+        if s.reloadAt and now >= s.reloadAt then
+            s.reloadAt = nil
+            s.ammo = g.mag
+            snd(h, g.rel2, 70, 100, 1)
+        end
+        if not op or not isValid(h) then return end
+
+        if g.mortar then                                                -- tube follows the drone crosshair
+            if s.mtarget then
+                local d = base:worldToLocal(s.mtarget) - s.pivot
+                turnTo(s, math.deg(math.atan2(d.y, d.x)), -(s.mpitch or 45), dt)
+            end
+            s.aPrev, s.rPrev = true, true
+        else
+
+        -- aim at what the gunner looks at (limited arc + turn speed)
+        local eye, aim = op:getShootPos(), op:getAimVector()
+        local tr = trace.line(eye, eye + aim * 30000, { op, base, s.seat }, MASK.SHOT)
+        local d = base:worldToLocal(tr.HitPos) - s.pivot
+        if d:getLength() < 60 then d = base:worldToLocal(base:getPos() + aim) end
+        local ty = clamp(math.deg(math.atan2(d.y, d.x)), -g.yaw, g.yaw)
+        local tp = clamp(-math.deg(math.atan2(d.z, math.sqrt(d.x * d.x + d.y * d.y))), -g.up, g.down)
+        turnTo(s, ty, tp, dt)
+
+        -- reload (R)
+        local r = op:keyDown(IN_KEY.RELOAD)
+        if r and not s.rPrev and not s.reloadAt and s.ammo < g.mag then
+            s.reloadAt = now + g.reload
+            snd(h, g.rel1, 70, 100, 1)
+        end
+        s.rPrev = r
+
+        -- fire (LMB)
+        local a = op:keyDown(IN_KEY.ATTACK)
+        local pressed = a and not s.aPrev
+        s.aPrev = a
+        if a and (g.auto or pressed) and now >= s.nextFire and not s.reloadAt and not s.over then
+            if s.ammo > 0 then
+                gunShoot(base, s, now)
+                if s.heat >= 1 then
+                    s.over = true
+                    snd(h, "ambient/gas/steam2.wav", 75, 110, 0.8)
+                end
+            elseif pressed then
+                snd(h, "weapons/pistol/pistol_empty.wav", 65, 100, 1)
+            end
+        end
+        end
+
+        -- HUD state for the gunner, 10 Hz
+        if now >= (s.nextSend or 0) then
+            s.nextSend = now + 0.1
+            net.start("it_gst")
+            net.writeUInt(clamp(s.ammo, 0, 255), 8)
+            net.writeUInt(clamp(math.floor(s.heat * 255), 0, 255), 8)
+            net.writeUInt((s.reloadAt and 1 or 0) + (s.over and 2 or 0) + ((now < s.nextFire) and 4 or 0), 3)
+            net.writeUInt(s.reloadAt and clamp(math.floor((1 - (s.reloadAt - now) / g.reload) * 255), 0, 255) or 0, 8)
+            net.send(op)
+        end
+    end
+
+    local lastGunT = timer.curtime()
+    hook.add("think", "it_guns", function()
+        local now = timer.curtime()
+        local dt = math.min(now - lastGunT, 0.2)
+        lastGunT = now
+        for base, s in pairs(guns) do
+            if isValid(base) then gunTick(base, s, now, dt) end
+        end
+        shellTick(now, dt)
+    end)
+
+    -- mortar drone camera: client -> server (camera position for PVS, tube angle, crosshair point)
+    local function mortarOf(ply)
+        for base, s in pairs(guns) do
+            if s.op == ply and s.g.mortar and isValid(base) then return base, s end
+        end
+    end
+    local camNext = {}
+    net.receive("it_mcam", function(len, ply)
+        local cam, pitch, tgt = net.readVector(), net.readUInt(7), net.readVector()
+        local now = timer.curtime()
+        if (camNext[ply] or 0) > now then return end
+        camNext[ply] = now + 0.08
+        local base, s = mortarOf(ply)
+        if not s then return end
+        local bp = base:getPos()
+        local d = V(cam.x - bp.x, cam.y - bp.y, 0)
+        if d:getLength() > MORTAR_MAX + 300 then cam = bp + d:getNormalized() * MORTAR_MAX + V(0, 0, cam.z - bp.z) end
+        s.cam, s.mpitch, s.mtarget = cam, clamp(pitch, 20, 85), tgt
+        if not isValid(s.camHolo) and hologram.canSpawn() then
+            s.camHolo = hologram.create(cam, Angle(), HM .. "box.mdl", V(0.1, 0.1, 0.1))
+            if s.camHolo then pcall(s.camHolo.setNoDraw, s.camHolo, true) end
+        end
+        if isValid(s.camHolo) then
+            pcall(s.camHolo.setPos, s.camHolo, cam)
+            if not s.viewSet then s.viewSet = pcall(ply.setViewEntity, ply, s.camHolo) end   -- server sends what the camera sees
+        end
+    end)
+    net.receive("it_mfire", function(len, ply)
+        local tgt, pitch = net.readVector(), net.readUInt(7)
+        local base, s = mortarOf(ply)
+        if s then mortarFire(base, s, tgt, pitch, timer.curtime()) end
+    end)
+
+    hook.add("EntityTakeDamage", "it_shoot", function(target, attacker, inflictor, amount)
+        local o = objs[target]
+        if SHOOTABLE and o and o.it.logic and BOOM[o.it.logic] and not o.fuseAt then fuse(target, 0.1) end
+        -- mortar hit -> damage number for the mortar gunner
+        if #booms > 0 and isValid(target) and (target:isPlayer() or target:isNPC()) and (amount or 0) > 0 then
+            local now, c = timer.curtime(), target:obbCenterW()
+            for i = #booms, 1, -1 do
+                local b = booms[i]
+                if now - b.t > 0.6 then
+                    table.remove(booms, i)
+                elseif isValid(b.op) and c:getDistance(b.pos) < b.r + 90 then
+                    net.start("it_mdmg")
+                    net.writeVector(c)
+                    net.writeUInt(clamp(math.floor(amount + 0.5), 0, 4095), 12)
+                    net.send(b.op)
+                    break
+                end
+            end
+        end
+    end)
+
+    hook.add("OnEntityCreated", "it_kill_bait", function(ent)
+        if not isValid(ent) or ent:getClass() ~= "npc_grenade_bugbait" then return end
+        if not isValid(O) or ent:getPos():getDistance(O:getShootPos()) > 200 then return end
+        pcall(function() ent:remove() end)
+    end)
+
+    if HIDE_BUGBAIT then
+        local hidden = setmetatable({}, { __mode = "k" })
+        timer.create("it_hide_bait", 0.5, 0, function()
+            if not holdsTool(O) then return end
+            local w = O:getActiveWeapon()
+            if hidden[w] then return end
+            hidden[w] = true
+            pcall(function() w:setNoDraw(true) end)
+        end)
+    end
+
+    -- late joiners get the mesh registry
+    hook.add("ClientInitialized", "it_sync", function(ply)
+        for e, o in pairs(objs) do
+            if isValid(e) and o.eidx and o.mdef then
+                sendReg(o.eidx, o.mdef, ply)
+                local s = guns[e]
+                if s and s.hidx then sendReg(s.hidx, o.it.gdef, ply) end
+                for _, x in ipairs(o.extras or {}) do
+                    if isValid(x) then sendReg(x:entIndex(), 255, ply, o.eidx) end
+                end
+            end
+        end
+    end)
+
+    timer.simple(1, function() sendState() end)
+    return
+end
+
+-- ================================ CLIENT ================================
+local me = player()
+local O = owner()
+local isOwner = me == O
+
+-- ---------------- materials + meshes (every client) ----------------
+local getMat, builder
+local meshes, bounds = {}, {}
+do
+local mats = {}
+function getMat(key)
+    if mats[key] ~= nil then return mats[key] end
+    local ok, m = pcall(material.load, MAT[key] or MAT.plain)
+    if not ok or not m then ok, m = pcall(material.load, MAT.plain) end
+    mats[key] = ok and m or false
+    return mats[key]
+end
+
+local UV = 1 / 48
+-- one triangle (both windings). na/nb/nc = optional smooth vertex normals
+-- GMod front face = clockwise seen from outside (SF's obj loader reverses the CCW obj order).
+-- Solid parts (known outside via center / vertex normals) get ONE side -> half the triangles;
+-- thin parts without an inside (nets, flag cloth) stay two-sided.
+local function emitTri(out, a, b, c, center, na, nb, nc)
+    local raw = (b - a):cross(c - a)
+    if raw:getLength() < 1e-6 then return end
+    local n = raw:getNormalized()
+    if center and n:dot(a - center) < 0 then n = -n end
+    if na and n:dot(na + nb + nc) < 0 then n = -n end
+    local ax, ay, az = math.abs(n.x), math.abs(n.y), math.abs(n.z)
+    local function vert(p, vn)
+        local u, v
+        if az >= ax and az >= ay then u, v = p.x * UV, p.y * UV
+        elseif ax >= ay then u, v = p.y * UV, -p.z * UV
+        else u, v = p.x * UV, -p.z * UV end
+        return { pos = p, normal = vn or n, u = u, v = v }
+    end
+    local oriented = center ~= nil or na ~= nil
+    if MESH_TWO_SIDED or not oriented or n:dot(raw) < 0 then
+        out[#out + 1] = vert(a, na) out[#out + 1] = vert(b, nb) out[#out + 1] = vert(c, nc)
+    end
+    if MESH_TWO_SIDED or not oriented or n:dot(raw) > 0 then
+        out[#out + 1] = vert(a, na) out[#out + 1] = vert(c, nc) out[#out + 1] = vert(b, nb)
+    end
+end
+local function emitQuad(out, a, b, c, d, center)
+    emitTri(out, a, b, c, center)
+    emitTri(out, a, c, d, center)
+end
+
+local HEX_FACES = { { 1, 4, 3, 2 }, { 5, 6, 7, 8 }, { 1, 2, 6, 5 }, { 2, 3, 7, 6 }, { 3, 4, 8, 7 }, { 4, 1, 5, 8 } }
+local function primTris(out, pr, mins, maxs)
+    local function grow(p)
+        mins.x, mins.y, mins.z = math.min(mins.x, p.x), math.min(mins.y, p.y), math.min(mins.z, p.z)
+        maxs.x, maxs.y, maxs.z = math.max(maxs.x, p.x), math.max(maxs.y, p.y), math.max(maxs.z, p.z)
+    end
+    if pr.t == "hex" then
+        local c = V()
+        for _, p in ipairs(pr.p) do c = c + p grow(p) end
+        c = c / 8
+        for _, f in ipairs(HEX_FACES) do emitQuad(out, pr.p[f[1]], pr.p[f[2]], pr.p[f[3]], pr.p[f[4]], c) end
+    elseif pr.t == "cyl" then
+        local c = pr.c + V(0, 0, pr.h / 2)
+        local top, bot = pr.c + V(0, 0, pr.h), pr.c
+        grow(pr.c - V(pr.r, pr.r, 0)) grow(pr.c + V(pr.r, pr.r, pr.h))
+        for i = 0, pr.n - 1 do
+            local a1, a2 = i / pr.n * math.pi * 2, (i + 1) / pr.n * math.pi * 2
+            local o1, o2 = V(math.cos(a1) * pr.r, math.sin(a1) * pr.r, 0), V(math.cos(a2) * pr.r, math.sin(a2) * pr.r, 0)
+            emitQuad(out, bot + o1, bot + o2, top + o2, top + o1, c)
+            emitTri(out, top, top + o1, top + o2, c)
+            emitTri(out, bot, bot + o2, bot + o1, c)
+        end
+    elseif pr.t == "ocyl" then
+        local e1, e2 = ocylBasis(pr.a, pr.b)
+        local c = (pr.a + pr.b) / 2
+        for i = 0, pr.n - 1 do
+            local a1, a2 = i / pr.n * math.pi * 2, (i + 1) / pr.n * math.pi * 2
+            local o1 = e1 * (math.cos(a1) * pr.r) + e2 * (math.sin(a1) * pr.r)
+            local o2 = e1 * (math.cos(a2) * pr.r) + e2 * (math.sin(a2) * pr.r)
+            emitQuad(out, pr.a + o1, pr.a + o2, pr.b + o2, pr.b + o1, c)
+            emitTri(out, pr.b, pr.b + o1, pr.b + o2, c)
+            emitTri(out, pr.a, pr.a + o2, pr.a + o1, c)
+            grow(pr.a + o1) grow(pr.b + o1)
+        end
+    elseif pr.t == "quads" then
+        for _, q in ipairs(pr.q) do
+            emitQuad(out, q[1], q[2], q[3], q[4], nil)
+            grow(q[1]) grow(q[3])
+        end
+    elseif pr.t == "sq" then
+        for _, q in ipairs(pr.q) do
+            emitTri(out, q[1], q[2], q[3], nil, q[5], q[6], q[7])
+            emitTri(out, q[1], q[3], q[4], nil, q[5], q[7], q[8])
+            grow(q[1]) grow(q[3])
+        end
+    end
+end
+
+-- meshes are built in a coroutine: big meshes (nest, trenches) never hit the CPU quota
+local function cpuBusy() return cpuUsed() > cpuMax() * (MESH_CPU + 0.1) end
+
+local function buildMesh(d)
+    local verts, mins, maxs
+    -- one mesh can hold max 65535 vertices: too big -> rebuild with rounder-but-cheaper sandbags
+    for _, q in ipairs({ { 10, 5 }, { 8, 4 }, { 6, 3 } }) do
+        BAG_NU, BAG_NV = q[1], q[2]
+        local prims = {}
+        d.fn(prims)
+        verts = {}
+        mins, maxs = V(1e9, 1e9, 1e9), V(-1e9, -1e9, -1e9)
+        for _, pr in ipairs(prims) do
+            primTris(verts, pr, mins, maxs)
+            if cpuBusy() then coroutine.yield() end
+        end
+        if #verts <= 65535 then break end
+    end
+    BAG_NU, BAG_NV = 10, 5
+    if #verts > 65535 then
+        meshes[d.idx] = false
+        print("[Infantry Tool] mesh too big for " .. d.key .. ": " .. #verts .. " vertices")
+        return
+    end
+    local ok, m = pcall(mesh.createFromTable, verts, true)
+    if ok and m then
+        meshes[d.idx] = m
+        bounds[d.idx] = { mins - V(2, 2, 2), maxs + V(2, 2, 2) }
+    else
+        meshes[d.idx] = false
+        print("[Infantry Tool] mesh failed for " .. d.key .. ": " .. tostring(type(m) == "table" and (m.message or m.msg) or m))
+    end
+end
+builder = coroutine.create(function()
+    for _, d in ipairs(MDEFS) do
+        buildMesh(d)
+        coroutine.yield()
+    end
+end)
+end
+
+-- registry of placed objects: entIndex -> {d = mesh def, it = item or nil, applied}
+local reg = {}
+local alias = {}            -- hidden extra collision prop -> main object index
+net.receive("it_reg", function()
+    local idx, di = net.readUInt(16), net.readUInt(8)
+    if di == 255 then alias[idx] = net.readUInt(16) return end
+    local d = MDEFS[di]
+    if d then reg[idx] = { d = d, it = d.it, applied = nil } end
+end)
+net.receive("it_unreg", function()
+    local idx = net.readUInt(16)
+    reg[idx] = nil
+    for k, m in pairs(alias) do if m == idx then alias[k] = nil end end
+end)
+-- your object behind an entity (extra collision props map to their main object) -> entity, item
+local function regOf(e)
+    if not isValid(e) then return nil end
+    local idx = e:entIndex()
+    if alias[idx] then
+        idx = alias[idx]
+        e = entity(idx)
+        if not isValid(e) then return nil end
+    end
+    local r = reg[idx]
+    if not r or not r.it then return nil end
+    return e, r.it
+end
+
+do
+local function applyMesh(e, d)
+    local m = meshes[d.idx]
+    if not m then return false end
+    local ok = pcall(function()
+        e:setMesh(m)
+        local mat = getMat(d.mat)
+        if mat then e:setMeshMaterial(mat) end
+        local b = bounds[d.idx]
+        e:setRenderBounds(b[1], b[2])
+    end)
+    return ok
+end
+
+local nextApply = 0
+hook.add("think", "it_meshes", function()
+    if coroutine.status(builder) ~= "dead" then
+        -- mesh.createFromTable(threaded) yields every 100 vertices -> resume MANY times per frame
+        -- until this frame's CPU budget is used (was 1 resume per frame = very slow).
+        -- NOTE: SF coroutine.resume is NOT protected and returns the yielded values (no ok flag)
+        local budget = cpuMax() * MESH_CPU
+        local n = 0
+        while coroutine.status(builder) ~= "dead" and cpuUsed() < budget and n < 2000 do
+            n = n + 1
+            local ok, err = pcall(coroutine.resume, builder)
+            if not ok then print("[Infantry Tool] mesh builder error: " .. tostring(err)) break end
+        end
+        return
+    end
+    local now = timer.realtime()
+    if now < nextApply then return end
+    nextApply = now + 0.5
+    for idx, r in pairs(reg) do
+        local e = entity(idx)
+        if isValid(e) and r.applied ~= e then
+            local c = e:getClass()
+            if (c == "starfall_prop" or c == "starfall_hologram") and applyMesh(e, r.d) then r.applied = e end
+        end
+    end
+end)
+
+end
+-- ---------------- field lights (every client; needs light.create permission on that client) ----------------
+local lights = {}
+hook.add("think", "it_lights", function()
+    for idx, L in pairs(lights) do
+        if not reg[idx] then
+            if L then pcall(L.destroy, L) end
+            lights[idx] = nil
+        end
+    end
+    for idx, r in pairs(reg) do
+        if r.it and r.it.logic == "light" then
+            local e = entity(idx)
+            if isValid(e) then
+                local pos = e:localToWorld(V(0, 0, 90))
+                local L = lights[idx]
+                if L == nil then
+                    local ok, x = pcall(light.create, pos, 900, 3.5, Color(255, 228, 180))
+                    L = ok and x or false
+                    lights[idx] = L
+                end
+                if L then
+                    pcall(L.setPos, L, pos)
+                    pcall(L.draw, L)
+                end
+            end
+        end
+    end
+end)
+
+local fTitle = render.createFont("Roboto", 30, 900, true)
+local fMed   = render.createFont("Roboto", 21, 800, true)
+local fSmall = render.createFont("Roboto", 16, 600, true)
+local fCard  = render.createFont("Roboto", 18, 800, true)
+local fTiny  = render.createFont("Roboto", 14, 600, true)
+
+-- ---------------- GUNNER (any player sitting in one of the guns) ----------------
+local gunner = nil       -- {hidx, it, g, geo}
+local gst = { ammo = 0, heat = 0, flags = 0, prog = 0 }
+local zoomLvl, z2Prev = 0, false
+
+net.receive("it_mnt", function()
+    zoomLvl = 0
+    if net.readBool() then
+        local hidx, ii = net.readUInt(16), net.readUInt(8)
+        local it = ITEMS[ii]
+        if it and it.gun then
+            gunner = { hidx = hidx, it = it, g = GUN_STATS[it.gun], geo = GUN_GEO[it.gun] }
+            gst.ammo, gst.heat, gst.flags, gst.prog = gunner.g.mag, 0, 0, 0
+            return
+        end
+    end
+    gunner = nil
+end)
+net.receive("it_gst", function()
+    gst.ammo = net.readUInt(8)
+    gst.heat = net.readUInt(8) / 255
+    gst.flags = net.readUInt(3)
+    gst.prog = net.readUInt(8) / 255
+end)
+
+local function gunHolo()
+    if not gunner or gunner.hidx == 0 then return nil end
+    local h = entity(gunner.hidx)
+    return isValid(h) and h or nil
+end
+
+local hiddenHolo = nil
+local function hideGunModel(h)
+    if hiddenHolo == h then return end
+    if isValid(hiddenHolo) then pcall(hiddenHolo.setNoDraw, hiddenHolo, false) end
+    hiddenHolo = h
+    if isValid(h) then pcall(h.setNoDraw, h, true) end
+end
+hook.add("think", "it_gunner", function()
+    if gunner and not me:inVehicle() then gunner = nil zoomLvl = 0 end
+    if not gunner then hideGunModel(nil) return end
+    local z = me:keyDown(IN_KEY.ATTACK2)
+    if z and not z2Prev then zoomLvl = (zoomLvl + 1) % (#gunner.g.zoom + 1) end
+    z2Prev = z
+    -- sniper: the rifle model (scope tube) is hidden for you while zoomed, so it never blocks the view
+    hideGunModel((gunner.it.gun == "sniper" and zoomLvl > 0) and gunHolo() or nil)
+end)
+
+-- ---------------- MORTAR (idea from "Mortar Predictive"): top-down drone camera ----------------
+-- WASD fly, Space up, Alt / Ctrl down, Shift fast; wheel / RMB / R = tube angle; LMB = fire at the crosshair
+local camViewEnt = nil          -- owner: looking through a periscope camera
+local drawMortarHud, bracket
+do
+local mcam = nil
+local mdmg = {}
+net.receive("it_mdmg", function()
+    local p, a = net.readVector(), net.readUInt(12)
+    mdmg[#mdmg + 1] = { pos = p, a = a, t = timer.realtime() }
+end)
+local function mortarAim()
+    local tr = trace.line(mcam.pos, mcam.pos - V(0, 0, 60000), { me }, MASK.SHOT)
+    return tr.HitPos
+end
+local function edge(key, field)
+    local d = me:keyDown(key)
+    local hit = d and not mcam[field]
+    mcam[field] = d
+    return hit
+end
+hook.add("think", "it_mortar", function()
+    local h = gunHolo()
+    if not h or not gunner.g.mortar then mcam = nil return end
+    local now = timer.realtime()
+    if not mcam then
+        mcam = { pos = h:getPos() + V(0, 0, MORTAR_CAM_H), yaw = h:getAngles().y, pitch = 45, last = now, nextSend = 0,
+                 a = true, r2 = true, rl = true, impacts = {} }
+    end
+    local dt = math.min(now - mcam.last, 0.1)
+    mcam.last = now
+    local ya = Angle(0, mcam.yaw, 0)
+    local f, r = ya:getForward(), ya:getRight()
+    local mv = V(0, 0, 0)
+    if me:keyDown(IN_KEY.FORWARD) then mv = mv + f end
+    if me:keyDown(IN_KEY.BACK) then mv = mv - f end
+    if me:keyDown(IN_KEY.MOVERIGHT) then mv = mv + r end
+    if me:keyDown(IN_KEY.MOVELEFT) then mv = mv - r end
+    local up = 0
+    if me:keyDown(IN_KEY.JUMP) then up = 1 end
+    if me:keyDown(IN_KEY.WALK) or me:keyDown(IN_KEY.DUCK) then up = -1 end
+    local gz = mortarAim().z
+    local hgt = math.max(mcam.pos.z - gz, 50)
+    local speed = clamp(hgt * 1.1, 350, 5000) * (me:keyDown(IN_KEY.SPEED) and 3 or 1)
+    if mv:getLength() > 0 then mv = mv:getNormalized() end
+    local np = mcam.pos + (mv * speed + V(0, 0, up * speed * 0.8)) * dt
+    local base = h:getPos()
+    local d = V(np.x - base.x, np.y - base.y, 0)
+    if d:getLength() > MORTAR_MAX then np = V(base.x, base.y, np.z) + d:getNormalized() * MORTAR_MAX end
+    np = V(np.x, np.y, clamp(np.z, gz + 120, gz + 8000))
+    local tr = trace.line(mcam.pos, np, { me }, MASK.SOLID_BRUSHONLY)
+    if tr.Hit and not tr.StartSolid then np = tr.HitPos + tr.HitNormal * 24 end
+    mcam.pos = np
+
+    if edge(IN_KEY.ATTACK2, "r2") then mcam.pitch = (mcam.pitch >= 85) and 20 or (mcam.pitch + 5) end
+    if edge(IN_KEY.RELOAD, "rl") then mcam.pitch = (mcam.pitch <= 20) and 85 or (mcam.pitch - 5) end
+    local tgt = mortarAim()
+    if edge(IN_KEY.ATTACK, "a") then
+        local _, _, t, D = mortarSolve(base, tgt, mcam.pitch, gunner.g.mortar.g)
+        if t and D >= MORTAR_MIN and D <= MORTAR_MAX and bit.band(gst.flags, 1) == 0 and gst.ammo > 0 then
+            net.start("it_mfire")
+            net.writeVector(tgt)
+            net.writeUInt(mcam.pitch, 7)
+            net.send()
+            mcam.impacts[#mcam.impacts + 1] = { pos = tgt, t = now + t }
+        end
+    end
+    if now >= mcam.nextSend then                                     -- camera -> server (PVS + tube aim), 10 Hz
+        mcam.nextSend = now + 0.1
+        net.start("it_mcam")
+        net.writeVector(mcam.pos)
+        net.writeUInt(mcam.pitch, 7)
+        net.writeVector(tgt)
+        net.send()
+    end
+end)
+pcall(hook.add, "mousewheeled", "it_mwheel", function(delta)
+    if mcam then mcam.pitch = clamp(mcam.pitch + (delta > 0 and 5 or -5), 20, 85) end
+end)
+
+function bracket(x, y, w, h, l)
+    render.drawRect(x, y, l, 2) render.drawRect(x, y, 2, l)
+    render.drawRect(x + w - l, y, l, 2) render.drawRect(x + w - 2, y, 2, l)
+    render.drawRect(x, y + h - 2, l, 2) render.drawRect(x, y + h - l, 2, l)
+    render.drawRect(x + w - l, y + h - 2, l, 2) render.drawRect(x + w - 2, y + h - l, 2, l)
+end
+function drawMortarHud(W, H, h)
+    if not mcam then return end
+    local now = timer.realtime()
+    local g = gunner.g
+    local base = h:getPos()
+    local tgt = mortarAim()
+    local _, v0, t, D = mortarSolve(base, tgt, mcam.pitch, g.mortar.g)
+    D = D or 0
+    local reloading = bit.band(gst.flags, 1) ~= 0
+    local status, sc
+    if D < MORTAR_MIN then status, sc = "TOO CLOSE", Color(255, 70, 60)
+    elseif D > MORTAR_MAX then status, sc = "OUT OF RANGE", Color(255, 70, 60)
+    elseif not t then status, sc = "TOO HIGH - raise the angle", Color(255, 150, 60)
+    elseif reloading then status, sc = "RELOADING", Color(255, 210, 90)
+    else status, sc = "READY", Color(120, 255, 120) end
+    render.setMaterial()
+    -- drone frame
+    render.setRGBA(255, 255, 255, 120)
+    bracket(40, 40, W - 80, H - 80, 60)
+    if math.floor(now * 2) % 2 == 0 then render.setRGBA(255, 40, 40, 230) render.drawFilledCircle(70, 72, 7) end
+    render.setFont(fMed)
+    render.setRGBA(255, 255, 255, 230)
+    render.drawSimpleText(86, 72, "MORTAR DRONE", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    -- crosshair + blast radius on the ground
+    local cx, cy = W / 2, H / 2
+    local sp, se = tgt:toScreen(), (tgt + V(g.mortar.r, 0, 0)):toScreen()
+    local rp = math.max(8, math.sqrt((se.x - sp.x) ^ 2 + (se.y - sp.y) ^ 2))
+    render.setRGBA(sc.r, sc.g, sc.b, 230)
+    render.drawCircle(cx, cy, rp) render.drawCircle(cx, cy, rp + 1)
+    render.drawRect(cx - 30, cy, 22, 2) render.drawRect(cx + 9, cy, 22, 2)
+    render.drawRect(cx, cy - 30, 2, 22) render.drawRect(cx, cy + 9, 2, 22)
+    render.drawFilledCircle(cx + 1, cy + 1, 2)
+    render.setFont(fMed)
+    render.drawSimpleText(cx, cy + rp + 22, status, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+    -- mortar position
+    local mp = base:toScreen()
+    if mp.visible then
+        render.setRGBA(120, 200, 255, 220)
+        render.drawRect(mp.x - 6, mp.y - 6, 12, 2) render.drawRect(mp.x - 6, mp.y + 4, 12, 2)
+        render.drawRect(mp.x - 6, mp.y - 6, 2, 12) render.drawRect(mp.x + 4, mp.y - 6, 2, 12)
+        render.setFont(fTiny)
+        render.drawSimpleText(mp.x, mp.y - 16, "MORTAR", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+    end
+    -- players / NPCs the camera can see
+    if MORTAR_MARKERS then
+        if now >= (mcam.markT or 0) then
+            mcam.markT = now + 0.3
+            local list = {}
+            local ok, found = pcall(find.inSphere, tgt, 3500)
+            if ok and found then
+                for _, e in ipairs(found) do
+                    if isValid(e) and e ~= me and ((e:isPlayer() and e:isAlive()) or e:isNPC()) then
+                        local c = e:obbCenterW()
+                        local vt = trace.line(mcam.pos, c, { me }, MASK.SHOT)
+                        if not vt.Hit or vt.Entity == e or vt.Fraction > 0.98 then list[#list + 1] = e end
+                    end
+                end
+            end
+            mcam.marks = list
+        end
+        render.setFont(fTiny)
+        for _, e in ipairs(mcam.marks or {}) do
+            if isValid(e) then
+                local c = e:obbCenterW()
+                local s2 = c:toScreen()
+                if s2.visible then
+                    local veh = e:isPlayer() and e:inVehicle()
+                    if veh then render.setRGBA(255, 160, 40, 240) else render.setRGBA(255, 60, 60, 240) end
+                    local k = 7
+                    render.drawRect(s2.x - k, s2.y - k, 2 * k, 2) render.drawRect(s2.x - k, s2.y + k - 2, 2 * k, 2)
+                    render.drawRect(s2.x - k, s2.y - k, 2, 2 * k) render.drawRect(s2.x + k - 2, s2.y - k, 2, 2 * k)
+                    render.drawSimpleText(s2.x, s2.y - 16, string.format("%.0f m", V(c.x - base.x, c.y - base.y, 0):getLength() * 0.01905),
+                        TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+                end
+            end
+        end
+    end
+    -- shells in the air: impact point + countdown
+    render.setFont(fSmall)
+    for i = #mcam.impacts, 1, -1 do
+        local im = mcam.impacts[i]
+        if now > im.t + 0.5 then table.remove(mcam.impacts, i)
+        else
+            local s2 = im.pos:toScreen()
+            if s2.visible then
+                render.setRGBA(255, 220, 90, 200)
+                render.drawCircle(s2.x, s2.y, 10)
+                render.drawSimpleText(s2.x, s2.y - 20, string.format("%.1f", math.max(0, im.t - now)), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+            end
+        end
+    end
+    -- damage numbers
+    render.setFont(fMed)
+    for i = #mdmg, 1, -1 do
+        local dn = mdmg[i]
+        local age = now - dn.t
+        if age > 2.5 then table.remove(mdmg, i)
+        else
+            local s2 = (dn.pos + V(0, 0, 30 + age * 40)):toScreen()
+            if s2.visible then
+                render.setRGBA(255, 80, 60, math.floor(255 * (1 - age / 2.5)))
+                render.drawSimpleText(s2.x, s2.y, "-" .. dn.a, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+            end
+        end
+    end
+    -- info panel
+    local x, y = 60, 110
+    render.setRGBA(0, 0, 0, 150)
+    render.drawRect(x, y, 260, 150)
+    render.setFont(fSmall)
+    render.setRGBA(255, 255, 255, 230)
+    render.drawSimpleText(x + 12, y + 16, "ANGLE  " .. mcam.pitch .. " deg", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.drawSimpleText(x + 12, y + 38, string.format("RANGE  %.0f m", D * 0.01905), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.drawSimpleText(x + 12, y + 60, t and string.format("FLIGHT  %.1f s", t) or "FLIGHT  -", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.drawSimpleText(x + 12, y + 82, string.format("ALT  %.0f m", math.max(0, mcam.pos.z - tgt.z) * 0.01905), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.drawSimpleText(x + 12, y + 104, string.format("MAX  %.0f m   MIN  %.0f m", MORTAR_MAX * 0.01905, MORTAR_MIN * 0.01905), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.setRGBA(40, 40, 40, 255) render.drawRect(x + 12, y + 124, 236, 10)
+    if reloading then render.setRGBA(230, 200, 90, 255) render.drawRect(x + 12, y + 124, 236 * gst.prog, 10)
+    else render.setRGBA(120, 255, 120, 255) render.drawRect(x + 12, y + 124, 236, 10) end
+    render.setRGBA(255, 255, 255, 200)
+    render.drawSimpleText(W / 2, H - 70, "WASD fly   Space / Alt height   Shift fast   Wheel / RMB / R angle   LMB fire   E leave",
+        TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+end
+
+hook.add("calcview", "it_gunview", function(pos, ang, fov)
+    if mcam and gunner then
+        mcam.yaw = ang.y
+        return { origin = mcam.pos, angles = Angle(90, ang.y, 0), fov = 90, drawviewer = true, zfar = 80000 }
+    end
+    if camViewEnt and not gunner then
+        if isValid(camViewEnt) then
+            return { origin = camViewEnt:localToWorld(V(12, 0, 45.5)), angles = ang, fov = 80, drawviewer = true }
+        end
+        camViewEnt = nil
+    end
+    local h = gunHolo()
+    if not h or gunner.g.ownView then return end
+    -- zoomed sniper: camera sits just in front of the scope lens -> no part of the model can block the view
+    local eye = (gunner.it.gun == "sniper" and zoomLvl > 0) and V(15, 0, 4) or gunner.geo.eye
+    return { origin = h:localToWorld(eye), angles = ang,
+             fov = zoomLvl > 0 and gunner.g.zoom[zoomLvl] or fov, drawviewer = false }
+end)
+
+end
+hook.add("adjustmousesensitivity", "it_gunsens", function()
+    if gunner and zoomLvl > 0 then return gunner.g.zoom[zoomLvl] / 75 end
+end)
+
+local function tri2(a, b, c)
+    render.drawPoly({ a, b, c })
+    render.drawPoly({ a, c, b })   -- the other winding (DrawPoly culls one of them)
+end
+local function scopeOverlay(W, H)
+    local cx, cy, R = W / 2, H / 2, H * 0.47
+    render.setMaterial()
+    render.setRGBA(0, 0, 0, 255)
+    render.drawRect(0, 0, cx - R + 1, H)
+    render.drawRect(cx + R - 1, 0, W - cx - R + 2, H)
+    render.drawRect(cx - R, 0, R * 2, cy - R + 1)
+    render.drawRect(cx - R, cy + R - 1, R * 2, H - cy - R + 2)
+    local N = 12
+    for q = 0, 3 do
+        local sx, sy = (q == 0 or q == 3) and 1 or -1, (q < 2) and 1 or -1
+        local corner = { x = cx + sx * R, y = cy + sy * R }
+        for k = 0, N - 1 do
+            local a1, a2 = k / N * math.pi / 2, (k + 1) / N * math.pi / 2
+            tri2(corner, { x = cx + sx * R * math.cos(a1), y = cy + sy * R * math.sin(a1) },
+                         { x = cx + sx * R * math.cos(a2), y = cy + sy * R * math.sin(a2) })
+        end
+    end
+    -- reticle: thick outer posts + thin center cross + mil dots
+    render.drawRect(cx - R, cy - 2, R - 40, 4)
+    render.drawRect(cx + 40, cy - 2, R - 40, 4)
+    render.drawRect(cx - 2, cy + 40, 4, R - 40)
+    render.drawRect(cx - 2, cy - R, 4, R - 40)
+    render.drawRect(cx - 40, cy, 80, 1)
+    render.drawRect(cx, cy - 40, 1, 80)
+    for k = 1, 4 do
+        render.drawFilledCircle(cx + k * 9, cy, 1.6) render.drawFilledCircle(cx - k * 9, cy, 1.6)
+        render.drawFilledCircle(cx, cy + k * 9, 1.6)
+    end
+end
+
+hook.add("drawhud", "it_gunhud", function()
+    local h = gunHolo()
+    if not h then return end
+    local W, H = render.getResolution()
+    local g, geo = gunner.g, gunner.geo
+    local mz = h:localToWorld(geo.muzzle)
+    if g.mortar then drawMortarHud(W, H, h) return end
+    local tr = trace.line(mz, mz + h:getForward() * 30000, { h }, MASK.SHOT)
+    local sp = tr.HitPos:toScreen()
+    local scoped = gunner.it.gun == "sniper" and zoomLvl > 0
+    if scoped then scopeOverlay(W, H) end
+
+    -- where the barrel really points (the gun lags behind your view a bit)
+    if sp.visible then
+        render.setMaterial()
+        if scoped then
+            render.setRGBA(255, 40, 40, 230)
+            render.drawFilledCircle(sp.x, sp.y, 2.5)
+        else
+            local busy = bit.band(gst.flags, 3) ~= 0
+            if busy then render.setRGBA(255, 90, 60, 230) else render.setRGBA(120, 255, 120, 230) end
+            render.drawCircle(sp.x, sp.y, 9)
+            render.drawRect(sp.x - 18, sp.y, 9, 1) render.drawRect(sp.x + 10, sp.y, 9, 1)
+            render.drawRect(sp.x, sp.y - 18, 1, 9) render.drawRect(sp.x, sp.y + 10, 1, 9)
+            render.drawFilledCircle(sp.x, sp.y, 1.5)
+        end
+    end
+
+    -- panel
+    local pw, ph = 380, 92
+    local x, y = W / 2 - pw / 2, H - ph - 40
+    render.setRGBA(0, 0, 0, 165)
+    render.drawRect(x, y, pw, ph)
+    render.setFont(fMed)
+    render.setRGBA(170, 220, 130, 255)
+    render.drawSimpleText(x + 12, y + 16, g.name .. (zoomLvl > 0 and ("  x" .. math.round(75 / g.zoom[zoomLvl], 1)) or ""), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.setRGBA(255, 255, 255, 230)
+    render.drawSimpleText(x + pw - 12, y + 16, "AMMO " .. gst.ammo .. " / " .. g.mag, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+    render.setFont(fSmall)
+    render.setRGBA(220, 220, 220, 220)
+    render.drawSimpleText(x + pw - 12, y + 40, string.format("%.0f m", tr.HitPos:getDistance(mz) * 0.01905), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+    local bx, by, bw = x + 12, y + 34, 220
+    local status
+    if bit.band(gst.flags, 1) ~= 0 then
+        status = "RELOADING"
+        render.setRGBA(40, 40, 40, 255) render.drawRect(bx, by, bw, 10)
+        render.setRGBA(230, 200, 90, 255) render.drawRect(bx, by, bw * gst.prog, 10)
+    elseif g.heatPer > 0 then
+        render.setRGBA(40, 40, 40, 255) render.drawRect(bx, by, bw, 10)
+        local over = bit.band(gst.flags, 2) ~= 0
+        render.setRGBA(255, math.floor(220 * (1 - gst.heat)), 50, 255) render.drawRect(bx, by, bw * math.min(gst.heat, 1), 10)
+        if over then status = "OVERHEAT" end
+    elseif bit.band(gst.flags, 4) ~= 0 then
+        status = "BOLT"
+    end
+    if status then
+        render.setRGBA(255, 120, 90, 255)
+        render.drawSimpleText(bx + bw + 10, by + 5, status, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    end
+    render.setRGBA(255, 255, 255, 200)
+    render.drawSimpleText(x + 12, y + 70, "LMB fire   RMB zoom   R reload   E leave", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+end)
+
+if not isOwner then return end
+
+-- ======================= OWNER ONLY: menu, ghost, input, HUD =======================
+local selected = ITEM_BY_ID.at
+local menuOpen, menuTab = false, 1
+local rot = 0
+local gridOn = true
+local gridIdx = 1
+local trenchOrigin, trenchYaw, trenchRot = nil, 0, 0
+local pendingProp, pendingStart = nil, nil
+local objCount, c4Count = 0, 0
+local msgText, msgUntil = "", 0
+local keyPrev = {}
+local waitRelease = false
+local lastPlaceCl = 0
+local selectorUntil = 0
+
+net.receive("it_state", function()
+    local has = net.readBool()
+    pendingProp, pendingStart = nil, nil
+    if has then
+        net.readEntity(function(e) if isValid(e) then pendingProp = e end end)
+        pendingStart = net.readVector()
+    end
+    objCount = net.readUInt(16)
+    c4Count = net.readUInt(8)
+    local m = net.readString()
+    if m ~= "" then msgText, msgUntil = m, timer.realtime() + 2.5 end
+end)
+
+local function say(m) msgText, msgUntil = m, timer.realtime() + 2.5 end
+
+local function pressedOnce(key)
+    local isMouse = key >= MOUSE.MOUSE1 and key <= MOUSE.MOUSE5
+    local down = isMouse and input.isMouseDown(key) or input.isKeyDown(key)
+    local first = down and not keyPrev[key]
+    keyPrev[key] = down
+    return first, down
+end
+
+local function setMenu(open)
+    menuOpen = open
+    pcall(input.enableCursor, open)
+    if not open then waitRelease = true end
+end
+
+-- toggled by the bind AND by the raw key: after clicking in the menu the game panel takes
+-- keyboard focus and the "+menu" bind is not fired anymore, the raw key still is
+local lastToggle = 0
+local function toggleMenu()
+    local t = timer.realtime()
+    if t - lastToggle < 0.25 then return end
+    lastToggle = t
+    setMenu(not menuOpen)
+end
+
+hook.add("think", "it_menukey", function()
+    local q = pressedOnce(KEY_MENU)
+    if not holdsTool(me) then return end
+    if q then toggleMenu() end
+end)
+
+-- block the bugbait attack + use Q for our menu
+hook.add("inputbindpressed", "it_binds", function(bind)
+    if not holdsTool(me) then return end
+    local b = string.lower(bind)
+    if string.find(b, "invnext", 1, true) or string.find(b, "invprev", 1, true) or string.find(b, "slot", 1, true) then
+        selectorUntil = timer.realtime() + SELECTOR_WINDOW
+        return
+    end
+    if b == KEY_MENU_BIND then
+        toggleMenu()
+        return true
+    end
+    if BLOCK_BUGBAIT and string.find(b, "+attack", 1, true) then
+        if timer.realtime() < selectorUntil and not menuOpen then selectorUntil = 0 return end
+        return true
+    end
+end)
+
+-- ghost holograms (item body + gun part + tripwire)
+local ghost = hologram.create(V(), Angle(), HM .. "box.mdl")
+local ghostGun = hologram.create(V(), Angle(), HM .. "box.mdl")
+local ghostWire = hologram.create(V(), Angle(), HM .. "cylinder.mdl")
+if ghost then ghost:setNoDraw(true) end
+if ghostGun then ghostGun:setNoDraw(true) end
+if ghostWire then ghostWire:setNoDraw(true) end
+local ghostItem = nil
+local ghostFix = nil
+local plan = nil          -- current placement {ok, pos, ang, normal, reason, stack}
+
+local function meshOnHolo(h, di, matKey)
+    if not meshes[di] then return false end
+    h:setModel(HM .. "box.mdl")
+    h:setMesh(meshes[di])
+    local mat = getMat(matKey)
+    if mat then h:setMeshMaterial(mat) end
+    local b = bounds[di]
+    h:setRenderBounds(b[1], b[2])
+    return true
+end
+
+local ghostKey = nil
+local function setGhostItem(it, lvl)
+    lvl = lvl or 0
+    local key = it.idx * 8 + lvl
+    if not ghost or ghostKey == key then return end
+    ghostItem, ghostKey = it, key
+    ghostFix = nil
+    pcall(function()
+        if it.mdef then
+            local di = (lvl > 0 and it.mountDefs and it.mountDefs[lvl]) or it.mdef
+            if not meshOnHolo(ghost, di, it.mat) then ghostItem, ghostKey = nil, nil end      -- mesh not built yet, retry
+            if it.gdef and ghostGun and not meshOnHolo(ghostGun, it.gdef, "metal") then ghostItem, ghostKey = nil, nil end
+        else
+            ghost:setMesh(nil)
+            ghost:setModel(it.model)
+            if it.kind == "tripwire" then ghostFix = nadeFix(ghost) end
+        end
+    end)
+end
+
+local function snapGrid(v, g) return math.round(v / g) * g end
+local camIdx, camCount = 0, 0
+
+-- trench grid cells covered by a piece (1 cell or 2x2 shelter, centre on a grid corner)
+local function cellsOf(pos, ang, size)
+    if (size or 1) < 2 then return { pos } end
+    local f, r, h = ang:getForward(), ang:getRight(), TRENCH_CELL / 2
+    return { pos + f * h + r * h, pos + f * h - r * h, pos - f * h + r * h, pos - f * h - r * h }
+end
+-- your trench pieces that overlap these cells -> list of { e, it }
+local function trenchOverlaps(pos, ang, size)
+    local mine, hit = cellsOf(pos, ang, size), {}
+    for idx, r in pairs(reg) do
+        if r.it and r.it.place == "trench" then
+            local e = entity(idx)
+            if isValid(e) then
+                local found = false
+                for _, a in ipairs(cellsOf(e:getPos(), e:getAngles(), r.it.size)) do
+                    for _, b in ipairs(mine) do
+                        if (a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 < 1600 and math.abs(a.z - b.z) < 100 then found = true end
+                    end
+                end
+                if found then hit[#hit + 1] = { e = e, it = r.it } end
+            end
+        end
+    end
+    return hit
+end
+
+-- prop grid frame: aligned to your nearest grid object (so walls line up), else the world grid
+local function propFrame(hit)
+    local best, bd = nil, 300
+    for idx, r in pairs(reg) do
+        if r.it and r.it.grid then
+            local e = entity(idx)
+            if isValid(e) then
+                local ep = e:getPos()
+                local d = math.sqrt((ep.x - hit.x) ^ 2 + (ep.y - hit.y) ^ 2)
+                if d < bd and math.abs(ep.z - hit.z) < 120 then best, bd = e, d end
+            end
+        end
+    end
+    if best then return best:getPos(), best:getAngles().y, true end
+    return V(0, 0, 0), 0, false
+end
+local function snapAngle(a, step) return math.round(a / step) * step end
+
+local function groundAt(p)
+    local tr = trace.line(p + V(0, 0, 80), p - V(0, 0, 400), { me }, MASK.SOLID)
+    return tr.Hit and tr.HitPos or nil
+end
+
+-- stackable item aimed at another stackable object -> snap exactly on top of it
+local function stackTarget(tr, it)
+    if not it.stack then return nil end
+    local e, tit = regOf(tr.Entity)
+    if not e or not tit.stack then return nil end
+    return e, tit
+end
+
+-- gun aimed at one of your trenches / fortifications -> mount plan: fills p.pos / p.ang / p.lvl, returns true
+--   trench / shelter: post next to the wall you look towards, barrel just over the parapet
+--   walls (bags, hesco, logs, crates, T-wall, nest, pillbox...): behind the wall on your side, post height = wall + 12
+--   watchtower: on the deck, post over the railing
+local function mountPlan(it, tr, eyeYaw, p)
+    local te, tit = regOf(tr.Entity)
+    if not te then return false end
+    local mortar = it.gun == "mortar"
+    local ta = te:getAngles()
+    if tit.place == "trench" then
+        if mortar then return false end
+        if not tit.walls then
+            if tit.cover == "closed" then
+                p.ok, p.reason = false, "Closed - no firing slits"
+                p.pos, p.ang = tr.HitPos, Angle(0, eyeYaw, 0)
+                return true
+            end
+            return false
+        end
+        local k = math.round(((eyeYaw - ta.y) % 360) / 90) % 4          -- 0 +X, 1 +Y, 2 -X, 3 -Y
+        local d = Angle(0, k * 90, 0):getForward()
+        local side = V(-d.y, d.x, 0)
+        local lp = te:worldToLocal(tr.HitPos)
+        local along = clamp(lp:dot(side), -(tit.span - 30), tit.span - 30)
+        local lpos = d * (tit.inner - MOUNT_FRONT) + side * along
+        p.pos = te:localToWorld(V(lpos.x, lpos.y, 0))
+        p.ang = Angle(0, ta.y + k * 90, 0)
+        p.normal = te:getUp()
+        p.lvl, p.mountName = MOUNT_TRENCH, "TRENCH MOUNT - faces the wall you look at"
+        if not tit.walls[({ "px", "py", "nx", "ny" })[k + 1]] then p.ok, p.reason = false, "No trench wall that way" end
+        return true
+    end
+    local m = tit.mnt
+    if not m then return false end
+    if m.deck then
+        local lp = te:worldToLocal(tr.HitPos)
+        if lp.z < m.deck - 10 then return false end
+        p.pos = te:localToWorld(V(clamp(lp.x, -m.half, m.half), clamp(lp.y, -m.half, m.half), m.deck))
+        p.ang = Angle(0, eyeYaw, 0)
+        p.normal = te:getUp()
+        p.lvl = mortar and 0 or mountLevelFor(m.P)
+        p.mountName = "TOWER DECK"
+        return true
+    end
+    local lp, le = te:worldToLocal(tr.HitPos), te:worldToLocal(me:getShootPos())
+    local best, bs, ba
+    for _, f in ipairs(m.faces) do
+        local ax = V(-f.d.y, f.d.x, 0)
+        local along = clamp((lp.x - f.o.x) * ax.x + (lp.y - f.o.y) * ax.y, -f.span, f.span)
+        local qx, qy = f.o.x + ax.x * along, f.o.y + ax.y * along
+        local score = math.sqrt((lp.x - qx) ^ 2 + (lp.y - qy) ^ 2)
+        if (le.x - f.o.x) * f.d.x + (le.y - f.o.y) * f.d.y <= 0 then score = score + 1000 end   -- you are not on that side
+        if not best or score < bs then best, bs, ba = f, score, along end
+    end
+    if not best then return false end
+    local ax = V(-best.d.y, best.d.x, 0)
+    local P0 = m.P or (m.top + 12)
+    local function at(back)
+        local lpos = best.o + best.d * (best.half + back) + ax * ba
+        local wp = te:localToWorld(V(lpos.x, lpos.y, 0))
+        local topZ = te:localToWorld(V(lpos.x, lpos.y, P0)).z
+        local g = trace.line(V(wp.x, wp.y, topZ), V(wp.x, wp.y, topZ - 400), { te, me }, MASK.SOLID)
+        local gz = g.Hit and g.HitPos.z or wp.z
+        return V(wp.x, wp.y, gz), topZ - gz
+    end
+    local pos, P = at(14)
+    local lvl = mortar and 0 or mountLevelFor(P)
+    if lvl == 0 then pos = at(30) end
+    p.pos, p.lvl = pos, lvl
+    p.ang = Angle(0, ta.y + math.deg(math.atan2(-best.d.y, -best.d.x)), 0)
+    p.normal = V(0, 0, 1)
+    p.mountName = lvl > 0 and ("WALL MOUNT - post " .. MOUNT_LEVELS[lvl]) or "BEHIND COVER"
+    if not mortar and P > MOUNT_LEVELS[#MOUNT_LEVELS] + 14 then p.ok, p.reason = false, "Too high for a gun" end
+    return true
+end
+
+local function computePlan(it)
+    local eyeYaw = me:getEyeAngles().y
+    if it.kind == "tripwire" and isValid(pendingProp) and pendingStart then
+        local tr = aimTrace(me, PLACE_RANGE + 600, { pendingProp })
+        local ok, len = wireOk(pendingStart, tr.HitPos, { pendingProp, me })
+        ok = ok and not badSurface(tr)
+        return { wire = true, ok = ok, a = pendingStart, b = tr.HitPos, normal = tr.HitNormal, len = len,
+                 reason = ok and nil or (len > 600 and "Too long" or "Can't hook the wire here") }
+    end
+    local tr = aimTrace(me, PLACE_RANGE)
+    if not tr.Hit or tr.HitSky then return { ok = false, reason = "Aim at a surface" } end
+    if it.kind == "cover" then                       -- swap a placed trench piece for its covered version
+        local te, tit = regOf(tr.Entity)
+        if not te or tit.place ~= "trench" then return { ok = false, reason = "Aim at your trench piece" } end
+        local v = TRENCH_VAR[tit.shape] and TRENCH_VAR[tit.shape][it.cover]
+        if not v then return { ok = false, reason = "This piece can't get a cover" } end
+        return { ok = v ~= tit, reason = (v == tit) and "Already like this" or nil, pos = te:getPos(), ang = te:getAngles(),
+                 normal = te:getUp(), replace = te:entIndex(), show = v }
+    end
+    local n = tr.HitNormal
+    local p = { ok = true, normal = n, pos = tr.HitPos }
+    if badSurface(tr) then p.ok, p.reason = false, "Not on players / vehicles" end
+    if MAX_OBJECTS > 0 and objCount >= MAX_OBJECTS then p.ok, p.reason = false, "Object limit" end
+
+    if it.kind == "gun" and mountPlan(it, tr, eyeYaw, p) then return p end
+
+    if it.place == "surface" then
+        p.ang = surfaceAngle(n, eyeYaw + 180 + rot)
+    elseif it.place == "upright" then
+        local te, tit = stackTarget(tr, it)
+        if te then
+            local ta = te:getAngles()
+            p.pos = te:localToWorld(V(0, 0, tit.stack))
+            p.ang = Angle(0, ta.y + rot, 0)
+            p.normal = te:getUp()
+            p.stack = true
+            return p
+        end
+        if n.z < 0.6 then p.ok, p.reason = false, "Needs flat ground" end
+        local pos = tr.HitPos
+        local face = eyeYaw + (it.faceAway and 0 or 180)
+        if gridOn and it.grid then
+            -- snap position to the grid of the nearest object, yaw: 90 deg steps towards you + R (45)
+            local fo, fy, aligned = propFrame(pos)
+            local G = PROP_GRIDS[gridIdx]
+            local fa = Angle(0, fy, 0)
+            local lp = worldToLocal(pos, Angle(), fo, fa)
+            local wp = localToWorld(V(snapGrid(lp.x, G), snapGrid(lp.y, G), 0), Angle(), fo, fa)
+            local g = groundAt(V(wp.x, wp.y, pos.z))
+            pos = g or V(wp.x, wp.y, pos.z)
+            p.ang = Angle(0, fy + snapAngle(face - fy, 90) + rot, 0)
+            p.grid = { o = fo, yaw = fy, g = G, aligned = aligned }
+        else
+            p.ang = Angle(0, face + rot, 0)
+        end
+        p.pos = pos
+    elseif it.place == "trench" then
+        -- aiming at one of your trenches: take its grid (so you can continue / change old trenches)
+        local hitE, hit = regOf(tr.Entity)
+        if hitE and hit.place == "trench" then
+            local ey = hitE:getAngles().y
+            local ep = cellsOf(hitE:getPos(), hitE:getAngles(), hit.size)[1]      -- a cell centre
+            local aligned = false
+            if trenchOrigin then
+                local lp = worldToLocal(ep, Angle(), trenchOrigin, Angle(0, trenchYaw, 0))
+                aligned = math.abs(lp.x - snapGrid(lp.x, TRENCH_CELL)) < 4 and math.abs(lp.y - snapGrid(lp.y, TRENCH_CELL)) < 4
+                    and math.abs(math.angleDifference(ey, snapAngle(ey - trenchYaw, 90) + trenchYaw)) < 2
+            end
+            if not aligned then
+                trenchOrigin, trenchYaw = ep, ey
+                say("Trench grid taken from the trench")
+            end
+            n = V(0, 0, 1)
+        end
+        if n.z < 0.7 then p.ok, p.reason = false, "Needs flat ground" end
+        if not trenchOrigin then
+            p.ang = Angle(0, trenchYaw, 0)
+        else
+            local ga = Angle(0, trenchYaw, 0)
+            local lp = worldToLocal(tr.HitPos, Angle(), trenchOrigin, ga)
+            local h2 = (it.size == 2) and TRENCH_CELL / 2 or 0             -- 2x2: centre on a grid corner
+            local cx, cy = snapGrid(lp.x - h2, TRENCH_CELL) + h2, snapGrid(lp.y - h2, TRENCH_CELL) + h2
+            local wp = localToWorld(V(cx, cy, 0), Angle(), trenchOrigin, ga)
+            local g = groundAt(V(wp.x, wp.y, tr.HitPos.z))
+            p.pos = g or V(wp.x, wp.y, tr.HitPos.z)
+            p.ang = Angle(0, trenchYaw + trenchRot * 90, 0)
+            p.cell = { cx, cy }
+            local ov = trenchOverlaps(p.pos, p.ang, it.size)
+            local old, oit = ov[1] and ov[1].e, ov[1] and ov[1].it
+            if #ov == 1 and (oit.size or 1) == (it.size or 1)
+                and (old:getPos().x - p.pos.x) ^ 2 + (old:getPos().y - p.pos.y) ^ 2 < 900 then
+                -- REPLACE the piece in this cell (keeps the exact position)
+                p.pos = old:getPos()
+                p.replace = old:entIndex()
+                if oit == it and math.abs(math.angleDifference(old:getAngles().y, p.ang.y)) < 2 then
+                    p.ok, p.reason = false, "Same piece - R to turn / pick another"
+                end
+            elseif #ov > 0 then
+                p.ok, p.reason = false, "Cells taken (remove the pieces first)"
+            end
+        end
+    end
+    return p
+end
+
+local function sendPlace(it, p)
+    net.start("it_cmd")
+    net.writeUInt(1, 4)
+    net.writeUInt(it.idx, 8)
+    net.writeVector(p.pos)
+    net.writeAngle(p.ang or Angle())
+    net.writeVector(p.normal or V(0, 0, 1))
+    net.writeUInt(p.lvl or 0, 4)
+    net.writeUInt(p.replace or 0, 16)
+    net.send()
+end
+local function sendSimple(act)
+    net.start("it_cmd")
+    net.writeUInt(act, 4)
+    net.send()
+end
+
+local function okColor(ok, a) return ok and Color(80, 255, 80, a) or Color(255, 60, 60, a) end
+local function hideGhosts()
+    if ghost then ghost:setNoDraw(true) end
+    if ghostGun then ghostGun:setNoDraw(true) end
+    if ghostWire then ghostWire:setNoDraw(true) end
+end
+
+hook.add("think", "it_input", function()
+    local has = holdsTool(me)
+    if not has then
+        camViewEnt, camIdx = nil, 0
+        if menuOpen then setMenu(false) end
+        hideGhosts()
+        plan = nil
+        return
+    end
+    local lmb, lmbDown = pressedOnce(MOUSE.MOUSE1)
+    local rmb = pressedOnce(MOUSE.MOUSE2)
+    local rotP = pressedOnce(KEY_ROTATE)
+    local gridP = pressedOnce(KEY_GRID)
+    local detP = pressedOnce(KEY_DETONATE)
+    local camP = pressedOnce(KEY_CAM)
+    if waitRelease then
+        if not lmbDown then waitRelease = false end
+        lmb = false
+    end
+    if menuOpen or timer.realtime() < selectorUntil then
+        hideGhosts()
+        return
+    end
+
+    local shift = input.isShiftDown()
+    if rotP then
+        if selected.place == "trench" then
+            if trenchOrigin then trenchRot = (trenchRot + (shift and -1 or 1)) % 4
+            else trenchYaw = trenchYaw + (shift and -ROT_FINE or ROT_FINE) end
+        else
+            rot = rot + (shift and -ROT_STEP or ROT_STEP)
+        end
+    end
+    if gridP then
+        if shift and selected.place == "trench" then trenchOrigin = nil trenchRot = 0 say("Trench grid reset")
+        elseif shift then
+            gridIdx = gridIdx % #PROP_GRIDS + 1
+            gridOn = true
+            say("Grid " .. PROP_GRIDS[gridIdx])
+        else gridOn = not gridOn say(gridOn and "Grid ON" or "Grid OFF") end
+    end
+    if detP then sendSimple(4) end
+    if camP then                                     -- periscope cameras: next / off
+        local list = {}
+        for idx, r in pairs(reg) do
+            if r.it and r.it.logic == "cam" and isValid(entity(idx)) then list[#list + 1] = idx end
+        end
+        table.sort(list)
+        if #list == 0 then say("No cameras placed") camIdx = 0
+        else camIdx = (camIdx + 1) % (#list + 1) end
+        camViewEnt = camIdx > 0 and entity(list[camIdx]) or nil
+        camCount = #list
+    end
+    if rmb then sendSimple(3) end
+
+    plan = computePlan(selected)
+    local showIt = plan.show or selected
+    if showIt.kind ~= "cover" then setGhostItem(showIt, plan.lvl) end
+
+    -- ghost visuals
+    if plan.wire then
+        if ghost then ghost:setNoDraw(true) end
+        if ghostGun then ghostGun:setNoDraw(true) end
+        if ghostWire and plan.len and plan.len > 1 then
+            ghostWire:setNoDraw(false)
+            ghostWire:setPos((plan.a + plan.b) / 2)
+            ghostWire:setAngles(upFrame(plan.b - plan.a))
+            ghostWire:setSize(V(0.6, 0.6, plan.len))
+            ghostWire:setColor(okColor(plan.ok, 200))
+        end
+    else
+        if ghostWire then ghostWire:setNoDraw(true) end
+        if ghost and plan.pos and ghostItem == showIt then
+            ghost:setNoDraw(false)
+            if selected.kind == "tripwire" and ghostFix then
+                local pp, pa = nadeTransform(ghostFix, plan.pos + plan.normal * (ghostFix.half + 0.3), upFrame(plan.normal))
+                ghost:setPos(pp) ghost:setAngles(pa)
+            else
+                ghost:setPos(plan.pos)
+                ghost:setAngles(plan.ang)
+            end
+            ghost:setColor(okColor(plan.ok, 130))
+            if ghostGun then
+                if selected.kind == "gun" then
+                    local gp, ga = localToWorld(gunPivot(selected.gun, plan.lvl), Angle(), plan.pos, plan.ang)
+                    ghostGun:setNoDraw(false)
+                    ghostGun:setPos(gp) ghostGun:setAngles(ga)
+                    ghostGun:setColor(okColor(plan.ok, 130))
+                else
+                    ghostGun:setNoDraw(true)
+                end
+            end
+        else
+            if ghost then ghost:setNoDraw(true) end
+            if ghostGun then ghostGun:setNoDraw(true) end
+        end
+    end
+
+    if lmb then
+        local nowR = timer.realtime()
+        if nowR - lastPlaceCl < PLACE_COOLDOWN then return end
+        if not plan.ok then say(plan.reason or "Not allowed") return end
+        lastPlaceCl = nowR
+        if plan.wire then
+            net.start("it_cmd")
+            net.writeUInt(2, 4)
+            net.writeVector(plan.b)
+            net.writeVector(plan.normal)
+            net.send()
+        else
+            if selected.place == "trench" and not trenchOrigin then
+                trenchOrigin = plan.pos
+                trenchRot = 0
+            end
+            sendPlace(plan.show or selected, plan)
+        end
+    end
+end)
+
+-- trench grid lines around the ghost
+hook.add("postdrawtranslucentrenderables", "it_grid", function(depth, sky)
+    if sky or not plan or not plan.pos or not holdsTool(me) or menuOpen then return end
+    if plan.grid then
+        -- prop grid: 9 x 9 lines around the ghost, in the frame of the aligned object
+        local gd = plan.grid
+        local fa = Angle(0, gd.yaw, 0)
+        local c = worldToLocal(plan.pos, Angle(), gd.o, fa)
+        local G, N = gd.g, 4
+        local z = plan.pos.z + 1
+        if gd.aligned then render.setColor(Color(120, 220, 255, 120)) else render.setColor(Color(255, 255, 255, 70)) end
+        for i = -N, N do
+            local a1 = localToWorld(V(c.x + i * G, c.y - N * G, 0), Angle(), gd.o, fa)
+            local a2 = localToWorld(V(c.x + i * G, c.y + N * G, 0), Angle(), gd.o, fa)
+            local b1 = localToWorld(V(c.x - N * G, c.y + i * G, 0), Angle(), gd.o, fa)
+            local b2 = localToWorld(V(c.x + N * G, c.y + i * G, 0), Angle(), gd.o, fa)
+            render.draw3DLine(V(a1.x, a1.y, z), V(a2.x, a2.y, z), false)
+            render.draw3DLine(V(b1.x, b1.y, z), V(b2.x, b2.y, z), false)
+        end
+        return
+    end
+    if selected.place ~= "trench" or not trenchOrigin or not plan.cell then return end
+    local ga = Angle(0, trenchYaw, 0)
+    local h = TRENCH_CELL / 2
+    local z = plan.pos.z + 2
+    render.setColor(Color(255, 220, 120, 140))
+    for i = -2, 2 do
+        for j = -2, 2 do
+            local cx, cy = plan.cell[1] + i * TRENCH_CELL, plan.cell[2] + j * TRENCH_CELL
+            local c1 = localToWorld(V(cx - h, cy - h, 0), Angle(), trenchOrigin, ga)
+            local c2 = localToWorld(V(cx + h, cy - h, 0), Angle(), trenchOrigin, ga)
+            local c3 = localToWorld(V(cx + h, cy + h, 0), Angle(), trenchOrigin, ga)
+            c1, c2, c3 = V(c1.x, c1.y, z), V(c2.x, c2.y, z), V(c3.x, c3.y, z)
+            render.draw3DLine(c1, c2, false)
+            render.draw3DLine(c2, c3, false)
+        end
+    end
+end)
+
+-- ---------------- HUD + menu ----------------
+local drawMenu
+do
+local CARD_W, CARD_H, CARD_GAP, CARD_COLS = 181, 64, 9, 4
+local mousePrev, rmousePrev = false, false
+
+local function inside(mx, my, x, y, w, h) return mx >= x and mx <= x + w and my >= y and my <= y + h end
+
+function drawMenu(W, H)
+    local mx, my = input.getCursorPos()
+    local down = input.isMouseDown(MOUSE.MOUSE1)
+    local click = down and not mousePrev
+    mousePrev = down
+    local rdown = input.isMouseDown(MOUSE.MOUSE2)
+    local rclick = rdown and not rmousePrev
+    rmousePrev = rdown
+
+    local pw, ph = 800, 640
+    local px, py = (W - pw) / 2, (H - ph) / 2
+    -- RMB anywhere or LMB outside the panel closes the menu
+    if rclick or (click and not inside(mx, my, px, py, pw, ph)) then
+        setMenu(false)
+        return
+    end
+    render.setRGBA(10, 14, 10, 225)
+    render.drawRect(px, py, pw, ph)
+    render.setRGBA(120, 160, 90, 255)
+    render.drawRect(px, py, pw, 3)
+    render.setFont(fTitle)
+    render.setRGBA(200, 230, 170, 255)
+    render.drawSimpleText(px + 20, py + 30, "INFANTRY TOOL", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.setFont(fSmall)
+    render.setRGBA(200, 200, 200, 200)
+    render.drawSimpleText(px + pw - 20, py + 30, objCount .. (MAX_OBJECTS > 0 and (" / " .. MAX_OBJECTS) or "") .. " objects", TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+
+    -- tabs
+    for i, name in ipairs(CAT_NAMES) do
+        local tw = math.floor((pw - 40 - (#CAT_NAMES - 1) * 6) / #CAT_NAMES)
+        local tx, ty, th = px + 20 + (i - 1) * (tw + 6), py + 58, 36
+        local hov = inside(mx, my, tx, ty, tw, th)
+        if menuTab == i then render.setRGBA(120, 160, 90, 255) elseif hov then render.setRGBA(70, 90, 60, 255) else render.setRGBA(40, 50, 36, 255) end
+        render.drawRect(tx, ty, tw, th)
+        render.setFont(fMed)
+        render.setRGBA(255, 255, 255, 255)
+        render.drawSimpleText(tx + tw / 2, ty + th / 2, name, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        if click and hov then menuTab = i end
+    end
+
+    -- item cards (4 columns)
+    local col, row = 0, 0
+    local cx0, cy0 = px + 20, py + 108
+    for _, it in ipairs(ITEMS) do
+        if it.cat == menuTab and not it.hidden then
+            local x = cx0 + col * (CARD_W + CARD_GAP)
+            local y = cy0 + row * (CARD_H + CARD_GAP)
+            local hov = inside(mx, my, x, y, CARD_W, CARD_H)
+            if selected == it then render.setRGBA(90, 130, 70, 255) elseif hov then render.setRGBA(60, 75, 52, 255) else render.setRGBA(32, 40, 30, 255) end
+            render.drawRect(x, y, CARD_W, CARD_H)
+            local c = it.color or Color(160, 160, 160)
+            render.setRGBA(c.r, c.g, c.b, 255)
+            render.drawRect(x + 7, y + 8, 8, CARD_H - 16)
+            render.setFont(fCard)
+            render.setRGBA(255, 255, 255, 255)
+            render.drawSimpleText(x + 22, y + 21, it.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            render.setFont(fTiny)
+            render.setRGBA(190, 200, 180, 220)
+            render.drawSimpleText(x + 22, y + 45, it.desc or "", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            if click and hov then
+                selected = it
+                rot = 0
+                if it.place == "trench" and not trenchOrigin then
+                    trenchYaw = math.round(me:getEyeAngles().y / ROT_FINE) * ROT_FINE
+                end
+                setMenu(false)
+                return
+            end
+            col = col + 1
+            if col >= CARD_COLS then col, row = 0, row + 1 end
+        end
+    end
+
+    -- bottom buttons
+    local bx, by = px + 20, py + ph - 56
+    local hovC = inside(mx, my, bx, by, 180, 38)
+    render.setRGBA(hovC and 190 or 140, 40, 40, 255)
+    render.drawRect(bx, by, 180, 38)
+    render.setFont(fMed)
+    render.setRGBA(255, 255, 255, 255)
+    render.drawSimpleText(bx + 90, by + 19, "CLEAR ALL", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+    if click and hovC then sendSimple(5) end
+
+    local hx = px + pw - 200
+    local hovX = inside(mx, my, hx, by, 180, 38)
+    render.setRGBA(hovX and 90 or 60, hovX and 90 or 60, hovX and 90 or 60, 255)
+    render.drawRect(hx, by, 180, 38)
+    render.setRGBA(255, 255, 255, 255)
+    render.drawSimpleText(hx + 90, by + 19, "CLOSE", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+    render.setFont(fSmall)
+    render.setRGBA(200, 200, 200, 180)
+    render.drawSimpleText(px + pw / 2, by + 19, "Q / RMB / click outside - close", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+    if click and hovX then setMenu(false) end
+end
+end
+
+-- rally flags: waypoint markers (always on, also without the tool)
+hook.add("drawhud", "it_flags", function()
+    if gunner then return end
+    render.setFont(fSmall)
+    for idx, r in pairs(reg) do
+        if r.it and r.it.logic == "flag" then
+            local e = entity(idx)
+            if isValid(e) then
+                local p = e:localToWorld(V(0, 0, 122))
+                local sp = p:toScreen()
+                if sp.visible then
+                    render.setRGBA(255, 70, 60, 230)
+                    render.drawFilledCircle(sp.x, sp.y, 5)
+                    render.drawRect(sp.x - 1, sp.y + 5, 2, 10)
+                    render.setRGBA(255, 255, 255, 230)
+                    render.drawSimpleText(sp.x, sp.y - 16, string.format("RALLY  %.0f m", p:getDistance(me:getPos()) * 0.01905),
+                        TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+                end
+            end
+        end
+    end
+end)
+
+hook.add("drawhud", "it_hud", function()
+    if not holdsTool(me) then return end
+    local W, H = render.getResolution()
+    if menuOpen then drawMenu(W, H) return end
+    if camViewEnt then
+        render.setRGBA(0, 0, 0, 160)
+        render.drawRect(W / 2 - 150, 30, 300, 40)
+        render.setFont(fMed)
+        render.setRGBA(255, 255, 255, 240)
+        render.drawSimpleText(W / 2, 50, "CAM " .. camIdx .. " / " .. camCount .. "    B = next / off", TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        render.setRGBA(255, 255, 255, 150)
+        bracket(W / 2 - 200, H / 2 - 120, 400, 240, 40)
+        render.drawRect(W / 2 - 10, H / 2, 20, 1) render.drawRect(W / 2, H / 2 - 10, 1, 20)
+    end
+
+    local x, y = W - 350, H * PANEL_Y_FRAC
+    render.setRGBA(0, 0, 0, 155)
+    render.drawRect(x, y, 330, 150)
+    render.setFont(fMed)
+    render.setRGBA(170, 220, 130, 255)
+    render.drawSimpleText(x + 12, y + 16, "INFANTRY TOOL", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    render.setRGBA(255, 255, 255, 220)
+    render.drawSimpleText(x + 318, y + 16, objCount .. (MAX_OBJECTS > 0 and ("/" .. MAX_OBJECTS) or ""), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+
+    render.setFont(fTitle)
+    if plan and plan.ok then render.setRGBA(120, 255, 120, 255) else render.setRGBA(255, 120, 120, 255) end
+    render.drawSimpleText(x + 12, y + 46, selected.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+    render.setFont(fSmall)
+    render.setRGBA(255, 255, 255, 210)
+    local l1 = "LMB place   RMB remove   R rotate   Q menu"
+    if selected.kind == "tripwire" and isValid(pendingProp) then l1 = "LMB stretch wire   RMB cancel" end
+    render.drawSimpleText(x + 12, y + 76, l1, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    local l2
+    if selected.place == "trench" then
+        if plan and plan.replace then l2 = "REPLACE this piece   R turn"
+        else l2 = trenchOrigin and "Aim at a trench = change it   Shift+G new grid" or "First trench sets the grid (R = turn)" end
+    elseif plan and plan.stack then
+        l2 = "STACK on top    rot " .. (rot % 360)
+    elseif selected.kind == "cover" then
+        l2 = "Click a trench piece / shelter to change it"
+    elseif selected.kind == "gun" then
+        l2 = (plan and plan.mountName) or "Aim at a trench / fort wall / tower deck to mount"
+    else
+        l2 = "G grid " .. (gridOn and PROP_GRIDS[gridIdx] or "OFF") .. (plan and plan.grid and plan.grid.aligned and " (aligned)" or "")
+            .. "  Shift+G size  R +45  rot " .. (rot % 360)
+    end
+    render.drawSimpleText(x + 12, y + 98, l2, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    if c4Count > 0 then
+        render.setRGBA(255, 190, 90, 255)
+        render.drawSimpleText(x + 12, y + 118, "X - detonate C4 (" .. c4Count .. ")", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    end
+    local m = (timer.realtime() < msgUntil) and msgText or (plan and not plan.ok and plan.reason) or nil
+    if m then
+        render.setRGBA(255, 220, 120, 255)
+        render.drawSimpleText(x + 12, y + 138, m, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    end
+end)
+
+-- recon radar / motion alarm markers (always, also without the tool in hand)
+local radarPts, radarT = {}, 0
+net.receive("it_radar", function()
+    local n = net.readUInt(6)
+    radarPts = {}
+    for i = 1, n do radarPts[i] = net.readVector() end
+    radarT = timer.realtime()
+end)
+hook.add("drawhud", "it_radarhud", function()
+    if #radarPts == 0 or timer.realtime() - radarT > 1.6 then return end
+    render.setFont(fTiny)
+    local eye = me:getShootPos()
+    for _, p in ipairs(radarPts) do
+        local sp = (p + V(0, 0, 76)):toScreen()
+        if sp.visible then
+            render.setMaterial()
+            render.setRGBA(255, 60, 50, 220)
+            tri2({ x = sp.x, y = sp.y - 8 }, { x = sp.x + 7, y = sp.y }, { x = sp.x, y = sp.y + 8 })
+            tri2({ x = sp.x, y = sp.y - 8 }, { x = sp.x - 7, y = sp.y }, { x = sp.x, y = sp.y + 8 })
+            render.setRGBA(255, 210, 200, 230)
+            render.drawSimpleText(sp.x, sp.y - 16, string.format("%.0fm", p:getDistance(eye) * 0.01905), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        end
+    end
+end)
+
+-- hide the bug viewmodel
+local vmHidden = nil
+hook.add("think", "it_vm", function()
+    local want = HIDE_BUGBAIT and holdsTool(me)
+    if want == vmHidden then return end
+    vmHidden = want
+    pcall(function()
+        local vm = me:getViewModel()
+        if isValid(vm) then vm:setNoDraw(want) end
+    end)
+end)
